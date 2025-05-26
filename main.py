@@ -4,9 +4,10 @@ import time
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.enums import ParseMode, MessageMediaType
-from threading import Thread
+from pyrogram.errors import FloodWait, RPCError
+import threading
 
-# Bot Config
+# Bot Configuration
 API_ID = 20219694
 API_HASH = "29d9b3a01721ab452fcae79346769e29"
 BOT_TOKEN = "7942215521:AAG5Zardlr7ULt2-yleqXeKjHKp4AQtVzd8"
@@ -17,22 +18,32 @@ class Config:
     EXTRACT_LIMIT = 100
     TARGET_CHAT = None
     ACTIVE = True
+    RESTART_COUNT = 0
 
-app = Client("link_modifier_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Initialize with better connection settings
+app = Client(
+    "link_modifier_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    workers=4,
+    sleep_threshold=60,
+    no_updates=True
+)
 
 def modify_only_caption_links(text: str, offset: int) -> str:
-    """Only modifies Telegram links in captions, leaves media source links unchanged"""
+    """Modifies only Telegram message links in captions"""
     if not text:
         return text
 
-    def offset_applier(match):
+    def replacer(match):
         url = match.group(1)
         chat = match.group(2)
         msg_id = match.group(3)
         return f"{url}{chat}/{int(msg_id) + offset}"
 
     pattern = r'(https?://t\.me/(c/\d+|[\w-]+)/(\d+))'
-    return re.sub(pattern, offset_applier, text)
+    return re.sub(pattern, replacer, text)
 
 async def process_single_message(client: Client, message: Message):
     try:
@@ -70,6 +81,10 @@ async def process_single_message(client: Client, message: Message):
             )
         return True
         
+    except FloodWait as e:
+        print(f"Flood wait: Sleeping for {e.value} seconds")
+        await asyncio.sleep(e.value)
+        return False
     except Exception as e:
         print(f"Error processing message: {e}")
         return False
@@ -161,6 +176,9 @@ async def handle_batch_input(client: Client, message: Message):
                 
                 await asyncio.sleep(1)
             
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                failed += 1
             except Exception as e:
                 failed += 1
                 continue
@@ -184,10 +202,36 @@ async def cancel_processing(client: Client, message: Message):
 
 def keep_alive():
     while Config.ACTIVE:
-        time.sleep(300)  # Ping every 5 minutes to prevent idle shutdown
+        time.sleep(300)
+        print("Keep-alive ping")
+
+async def run_bot():
+    while Config.ACTIVE and Config.RESTART_COUNT < 5:
+        try:
+            print("⚡ Starting bot...")
+            await app.start()
+            print("✅ Bot started successfully")
+            await app.idle()
+        except RPCError as e:
+            print(f"RPC Error: {e}")
+            Config.RESTART_COUNT += 1
+            await asyncio.sleep(10)
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            Config.RESTART_COUNT += 1
+            await asyncio.sleep(30)
+        finally:
+            if Config.ACTIVE:
+                try:
+                    await app.stop()
+                except:
+                    pass
 
 if __name__ == "__main__":
-    print("⚡ Bot started!")
     # Start keep-alive thread
-    Thread(target=keep_alive, daemon=True).start()
-    app.run()
+    threading.Thread(target=keep_alive, daemon=True).start()
+    
+    # Run bot with restart capability
+    asyncio.get_event_loop().run_until_complete(run_bot())
+    
+    print("Bot stopped")
