@@ -111,7 +111,8 @@ async def start_batch(client: Client, message: Message):
         f"source_post_link https://t.me/...`"
     )
 
-@app.on_message(filters.text & filters.incoming & ~filters.command)
+# Fixed filter syntax here
+@app.on_message(filters.text & filters.incoming & ~filters.command())
 async def handle_batch_input(client: Client, message: Message):
     if not Config.PROCESSING:
         return
