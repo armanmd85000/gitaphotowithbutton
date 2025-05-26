@@ -8,7 +8,7 @@ from pyrogram.enums import ParseMode, MessageMediaType
 # Bot Configuration
 API_ID = 20219694 
 API_HASH = "29d9b3a01721ab452fcae79346769e29"
-BOT_TOKEN = "7942215521:AAG5Zardlr7ULt2-yleqXeKjHKp4AQtVzd8"
+BOT_TOKEN = "8050401845:AAHJh55GaGGt79-D0lJT2apXu3DxkVrgmjQ"
 
 class Config:
     OFFSET = 0
