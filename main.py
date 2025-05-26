@@ -8,7 +8,7 @@ from pyrogram.errors import FloodWait, ChatWriteForbidden
 # Bot Configuration
 API_ID = 20219694
 API_HASH = "29d9b3a01721ab452fcae79346769e29"
-BOT_TOKEN = "7942215521:AAG5Zardlr7ULt2-yleqXeKjHKp4AQtVzd8"
+BOT_TOKEN = "8111929199:AAFgqWzWSjom3Sv7IIbFs0OaO-WzVJIbZbg"
 
 class Config:
     OFFSET = 0  # How much to add/subtract from message IDs in captions
