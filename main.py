@@ -111,8 +111,11 @@ async def start_batch(client: Client, message: Message):
         f"source_post_link https://t.me/...`"
     )
 
-# Fixed filter syntax here
-@app.on_message(filters.text & filters.incoming & ~filters.command())
+# Corrected filter syntax - this is the key fix
+def non_command_filter(_, __, message: Message):
+    return not message.text.startswith('/')
+
+@app.on_message(filters.text & filters.incoming & filters.create(non_command_filter))
 async def handle_batch_input(client: Client, message: Message):
     if not Config.PROCESSING:
         return
