@@ -3,7 +3,7 @@ import asyncio
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 from pyrogram.enums import ParseMode, MessageMediaType
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, ChatWriteForbidden
 
 # Bot Configuration
 API_ID = 20219694
@@ -14,6 +14,9 @@ class Config:
     OFFSET = 0  # How much to add/subtract from message IDs in captions
     PROCESSING = False
     BATCH_MODE = False
+    CHAT_ID = None
+    START_ID = None
+    END_ID = None
 
 app = Client(
     "ultimate_link_modifier",
@@ -36,37 +39,59 @@ def modify_caption_links(text: str, offset: int) -> str:
     pattern = r'(https?://t\.me/(c/\d+|[\w-]+)/(\d+))'
     return re.sub(pattern, replacer, text)
 
-async def process_message(client: Client, message: Message):
+async def safe_send_message(client: Client, chat_id: int, text: str):
+    """Handle message sending with error handling"""
     try:
-        if message.media:
-            caption = message.caption or ""
+        await client.send_message(
+            chat_id,
+            text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return True
+    except ChatWriteForbidden:
+        print(f"Cannot send messages to chat {chat_id}")
+        return False
+    except Exception as e:
+        print(f"Error sending message: {e}")
+        return False
+
+async def process_message(client: Client, source_msg: Message, target_chat_id: int):
+    try:
+        if source_msg.media:
+            caption = source_msg.caption or ""
             modified_caption = modify_caption_links(caption, Config.OFFSET)
             
-            if message.media == MessageMediaType.PHOTO:
-                await message.reply_photo(
-                    message.photo.file_id,
-                    caption=modified_caption,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            elif message.media == MessageMediaType.VIDEO:
-                await message.reply_video(
-                    message.video.file_id,
-                    caption=modified_caption,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            else:
-                await message.reply_document(
-                    message.document.file_id,
-                    caption=modified_caption,
-                    parse_mode=ParseMode.MARKDOWN
-                )
+            try:
+                if source_msg.media == MessageMediaType.PHOTO:
+                    await client.send_photo(
+                        target_chat_id,
+                        source_msg.photo.file_id,
+                        caption=modified_caption,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                elif source_msg.media == MessageMediaType.VIDEO:
+                    await client.send_video(
+                        target_chat_id,
+                        source_msg.video.file_id,
+                        caption=modified_caption,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    await client.send_document(
+                        target_chat_id,
+                        source_msg.document.file_id,
+                        caption=modified_caption,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                return True
+            except ChatWriteForbidden:
+                # If can't send media, try sending just the caption as text
+                if modified_caption:
+                    return await safe_send_message(client, target_chat_id, modified_caption)
+                return False
         else:
-            modified_text = modify_caption_links(message.text, Config.OFFSET)
-            await message.reply(
-                modified_text,
-                parse_mode=ParseMode.MARKDOWN
-            )
-        return True
+            modified_text = modify_caption_links(source_msg.text, Config.OFFSET)
+            return await safe_send_message(client, target_chat_id, modified_text)
         
     except FloodWait as e:
         print(f"Waiting {e.value} seconds due to flood limit")
@@ -122,9 +147,9 @@ async def start_batch(client: Client, message: Message):
     
     Config.PROCESSING = True
     Config.BATCH_MODE = True
+    Config.CHAT_ID = None
     Config.START_ID = None
     Config.END_ID = None
-    Config.CHAT_ID = None
     
     await message.reply(
         f"🔹 Batch Mode Started\n"
@@ -139,7 +164,6 @@ async def cancel_cmd(client: Client, message: Message):
     Config.BATCH_MODE = False
     await message.reply("✅ Processing stopped")
 
-# Handle all messages
 @app.on_message(filters.text & filters.private)
 async def handle_message(client: Client, message: Message):
     if not Config.PROCESSING or "t.me/" not in message.text:
@@ -155,7 +179,6 @@ async def handle_message(client: Client, message: Message):
 
         if Config.BATCH_MODE:
             if Config.START_ID is None:
-                # First link (starting point)
                 Config.START_ID = msg_id
                 Config.CHAT_ID = chat_id
                 await message.reply(
@@ -164,20 +187,11 @@ async def handle_message(client: Client, message: Message):
                     f"(e.g. https://t.me/channel/456)"
                 )
             elif Config.END_ID is None:
-                # Second link (ending point)
                 if chat_id != Config.CHAT_ID:
                     return await message.reply("❌ Both links must be from same channel")
                 
                 Config.END_ID = msg_id
                 await process_batch(client, message)
-        else:
-            # Single post processing
-            msg = await client.get_messages(chat_id, msg_id)
-            if not msg:
-                return await message.reply("❌ Couldn't fetch that message")
-            
-            await process_message(client, msg)
-            
     except Exception as e:
         await message.reply(f"❌ Error: {str(e)}")
         Config.PROCESSING = False
@@ -205,7 +219,8 @@ async def process_batch(client: Client, message: Message):
             try:
                 msg = await client.get_messages(Config.CHAT_ID, current_id)
                 if msg and not msg.empty:
-                    if await process_message(client, msg):
+                    success = await process_message(client, msg, message.chat.id)
+                    if success:
                         processed += 1
                     else:
                         failed += 1
