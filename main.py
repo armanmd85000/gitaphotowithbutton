@@ -144,7 +144,7 @@ async def batch_command(client: Client, message: Message):
             f"🔗 Now send me the first Telegram post link!",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("Cancel", callback_data="cancel_batch")]
-            )
+])
         )
     except Exception as e:
         await message.reply(f"❌ Error: {str(e)}")
