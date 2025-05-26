@@ -1,11 +1,9 @@
 import re
 import asyncio
-import time
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 from pyrogram.enums import ParseMode, MessageMediaType
-from pyrogram.errors import FloodWait, RPCError
-import threading
+from pyrogram.errors import FloodWait
 
 # Bot Configuration
 API_ID = 20219694
@@ -13,26 +11,18 @@ API_HASH = "29d9b3a01721ab452fcae79346769e29"
 BOT_TOKEN = "7942215521:AAG5Zardlr7ULt2-yleqXeKjHKp4AQtVzd8"
 
 class Config:
-    OFFSET = 0
+    OFFSET = 0  # How much to add/subtract from message IDs in captions
     PROCESSING = False
-    EXTRACT_LIMIT = 100
-    TARGET_CHAT = None
-    ACTIVE = True
-    RESTART_COUNT = 0
 
-# Initialize with better connection settings
 app = Client(
-    "link_modifier_bot",
+    "caption_link_modifier",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    workers=4,
-    sleep_threshold=60,
-    no_updates=True
+    bot_token=BOT_TOKEN
 )
 
-def modify_only_caption_links(text: str, offset: int) -> str:
-    """Modifies only Telegram message links in captions"""
+def modify_caption_links(text: str, offset: int) -> str:
+    """Only modifies Telegram message links in captions"""
     if not text:
         return text
 
@@ -42,196 +32,119 @@ def modify_only_caption_links(text: str, offset: int) -> str:
         msg_id = match.group(3)
         return f"{url}{chat}/{int(msg_id) + offset}"
 
+    # This pattern matches t.me/.../123 links but not media source links
     pattern = r'(https?://t\.me/(c/\d+|[\w-]+)/(\d+))'
     return re.sub(pattern, replacer, text)
 
-async def process_single_message(client: Client, message: Message):
+async def process_public_post(client: Client, message: Message):
     try:
-        if message.media:
-            caption = message.caption or ""
-            modified_caption = modify_only_caption_links(caption, Config.OFFSET)
+        # Extract the public post link from message
+        if not message.text or "t.me/" not in message.text:
+            return await message.reply("Please send a valid Telegram post link")
+
+        match = re.search(r't\.me/(?:c/)?([^/]+)/(\d+)', message.text)
+        if not match:
+            return await message.reply("Invalid link format. Send like: https://t.me/channel/123")
+
+        chat_id = match.group(1)
+        msg_id = int(match.group(2))
+
+        # Get the original message
+        original_msg = await client.get_messages(chat_id, msg_id)
+        if not original_msg:
+            return await message.reply("Couldn't fetch that message")
+
+        # Process the message
+        if original_msg.media:
+            caption = original_msg.caption or ""
+            modified_caption = modify_caption_links(caption, Config.OFFSET)
             
-            if message.media == MessageMediaType.PHOTO:
+            if original_msg.media == MessageMediaType.PHOTO:
                 await client.send_photo(
-                    Config.TARGET_CHAT,
-                    message.photo.file_id,
+                    message.chat.id,
+                    original_msg.photo.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
-            elif message.media == MessageMediaType.VIDEO:
+            elif original_msg.media == MessageMediaType.VIDEO:
                 await client.send_video(
-                    Config.TARGET_CHAT,
-                    message.video.file_id,
+                    message.chat.id,
+                    original_msg.video.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
                 await client.send_document(
-                    Config.TARGET_CHAT,
-                    message.document.file_id,
+                    message.chat.id,
+                    original_msg.document.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
         else:
-            modified_text = modify_only_caption_links(message.text, Config.OFFSET)
+            modified_text = modify_caption_links(original_msg.text, Config.OFFSET)
             await client.send_message(
-                Config.TARGET_CHAT,
+                message.chat.id,
                 modified_text,
                 parse_mode=ParseMode.MARKDOWN
             )
-        return True
-        
-    except FloodWait as e:
-        print(f"Flood wait: Sleeping for {e.value} seconds")
-        await asyncio.sleep(e.value)
-        return False
-    except Exception as e:
-        print(f"Error processing message: {e}")
-        return False
 
-@app.on_message(filters.command(["addnumber", "lessnumber"]))
+        await message.reply("✅ Post processed successfully!")
+
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        await message.reply(f"⚠️ Please wait {e.value} seconds and try again")
+    except Exception as e:
+        await message.reply(f"❌ Error: {str(e)}")
+
+@app.on_message(filters.command(["start", "help"]))
+async def start_cmd(client: Client, message: Message):
+    help_text = """
+🤖 **Simple Telegram Link Modifier Bot**
+
+🔹 Just send me a public channel post link
+🔹 I'll forward it with modified caption links
+
+⚙️ **Commands:**
+/addnumber N - Add N to message IDs in captions
+/lessnumber N - Subtract N from message IDs in captions
+/setoffset N - Set absolute offset value
+
+Example link:
+https://t.me/public_channel/123
+"""
+    await message.reply(help_text)
+
+@app.on_message(filters.command(["addnumber", "lessnumber", "setoffset"]))
 async def set_offset_cmd(client: Client, message: Message):
     try:
         amount = int(message.command[1])
         if message.command[0] == "addnumber":
             Config.OFFSET += amount
-            action = "added"
-        else:
+            action = "Added"
+        elif message.command[0] == "lessnumber":
             Config.OFFSET -= amount
-            action = "subtracted"
+            action = "Subtracted"
+        else:
+            Config.OFFSET = amount
+            action = "Set"
         
-        await message.reply(f"✅ Offset {action}: {amount}\nNew offset: {Config.OFFSET}")
+        await message.reply(f"✅ {action} offset: {amount}\nNew offset: {Config.OFFSET}")
     except:
-        await message.reply("⚠️ Usage: /addnumber 2 or /lessnumber 3")
+        await message.reply("⚠️ Usage: /addnumber 2 or /lessnumber 3 or /setoffset 5")
 
-@app.on_message(filters.command("startbatch"))
-async def start_batch(client: Client, message: Message):
+@app.on_message(filters.text & ~filters.command)
+async def handle_message(client: Client, message: Message):
     if Config.PROCESSING:
-        return await message.reply("⚠️ Processing already in progress")
-    
-    Config.PROCESSING = True
-    args = message.text.split()
-    
-    if len(args) > 1:
-        try:
-            Config.EXTRACT_LIMIT = min(int(args[1]), 200)
-        except:
-            pass
-    
-    await message.reply(
-        f"🔹 Batch processing started\n"
-        f"📌 Limit: {Config.EXTRACT_LIMIT} messages\n"
-        f"🔢 Offset: {Config.OFFSET}\n\n"
-        f"Now send in this format:\n"
-        f"`target_channel @username\n"
-        f"source_post_link https://t.me/...`"
-    )
-
-def is_not_command(_, __, message: Message):
-    return not message.text.startswith('/')
-
-@app.on_message(filters.text & filters.incoming & filters.create(is_not_command))
-async def handle_batch_input(client: Client, message: Message):
-    if not Config.PROCESSING:
         return
     
+    Config.PROCESSING = True
     try:
-        parts = message.text.split('\n')
-        if len(parts) < 2:
-            return await message.reply("⚠️ Wrong format! Example:\n@target_channel\nhttps://t.me/source/123")
-        
-        Config.TARGET_CHAT = parts[0].strip()
-        source_link = parts[1].strip()
-        
-        match = re.search(r't\.me/(?:c/)?(\d+|\w+)/(\d+)', source_link)
-        if not match:
-            return await message.reply("❌ Invalid Telegram link")
-        
-        chat_id = match.group(1)
-        start_id = int(match.group(2))
-        
-        progress_msg = await message.reply("⏳ Processing started...")
-        success = failed = 0
-        
-        for i in range(Config.EXTRACT_LIMIT):
-            if not Config.PROCESSING:
-                break
-            
-            try:
-                current_id = start_id + i
-                msg = await client.get_messages(chat_id, current_id)
-                
-                if msg and not msg.empty:
-                    if await process_single_message(client, msg):
-                        success += 1
-                    else:
-                        failed += 1
-                
-                if (success + failed) % 5 == 0:
-                    await progress_msg.edit(
-                        f"⏳ Progress: {success + failed}/{Config.EXTRACT_LIMIT}\n"
-                        f"✅ Success: {success}\n"
-                        f"❌ Failed: {failed}"
-                    )
-                
-                await asyncio.sleep(1)
-            
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
-                failed += 1
-            except Exception as e:
-                failed += 1
-                continue
-        
-        await progress_msg.edit(
-            f"🎉 Processing complete!\n"
-            f"• Total: {success + failed}\n"
-            f"• Success: {success}\n"
-            f"• Failed: {failed}\n"
-            f"• Applied offset: {Config.OFFSET}"
-        )
-    
+        await process_public_post(client, message)
     finally:
         Config.PROCESSING = False
-        Config.TARGET_CHAT = None
-
-@app.on_message(filters.command("cancel"))
-async def cancel_processing(client: Client, message: Message):
-    Config.PROCESSING = False
-    await message.reply("❌ Processing cancelled")
-
-def keep_alive():
-    while Config.ACTIVE:
-        time.sleep(300)
-        print("Keep-alive ping")
-
-async def run_bot():
-    while Config.ACTIVE and Config.RESTART_COUNT < 5:
-        try:
-            print("⚡ Starting bot...")
-            await app.start()
-            print("✅ Bot started successfully")
-            await app.idle()
-        except RPCError as e:
-            print(f"RPC Error: {e}")
-            Config.RESTART_COUNT += 1
-            await asyncio.sleep(10)
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            Config.RESTART_COUNT += 1
-            await asyncio.sleep(30)
-        finally:
-            if Config.ACTIVE:
-                try:
-                    await app.stop()
-                except:
-                    pass
 
 if __name__ == "__main__":
-    # Start keep-alive thread
-    threading.Thread(target=keep_alive, daemon=True).start()
-    
-    # Run bot with restart capability
-    asyncio.get_event_loop().run_until_complete(run_bot())
-    
-    print("Bot stopped")
+    print("⚡ Bot Started!")
+    app.start()
+    idle()
+    app.stop()
