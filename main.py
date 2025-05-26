@@ -13,9 +13,10 @@ BOT_TOKEN = "7942215521:AAG5Zardlr7ULt2-yleqXeKjHKp4AQtVzd8"
 class Config:
     OFFSET = 0  # How much to add/subtract from message IDs in captions
     PROCESSING = False
+    BATCH_MODE = False
 
 app = Client(
-    "personal_link_modifier",
+    "ultimate_link_modifier",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
@@ -32,7 +33,6 @@ def modify_caption_links(text: str, offset: int) -> str:
         msg_id = match.group(3)
         return f"{url}{chat}/{int(msg_id) + offset}"
 
-    # This pattern matches t.me/.../123 links in captions
     pattern = r'(https?://t\.me/(c/\d+|[\w-]+)/(\d+))'
     return re.sub(pattern, replacer, text)
 
@@ -79,20 +79,21 @@ async def process_message(client: Client, message: Message):
 @app.on_message(filters.command(["start", "help"]))
 async def start_cmd(client: Client, message: Message):
     help_text = """
-🤖 **Personal Link Modifier Bot**
+🤖 **Ultimate Link Modifier Bot**
 
-🔹 Send me a post link or forward posts to me
-🔹 I'll modify Telegram links in captions
+🔹 /batch - Process all posts between two links
+🔹 /addnumber N - Add N to message IDs in captions
+🔹 /lessnumber N - Subtract N from message IDs
+🔹 /setoffset N - Set absolute offset value
+🔹 /cancel - Stop current processing
 
-⚙️ **Commands:**
-/addnumber N - Add N to message IDs in captions
-/lessnumber N - Subtract N from message IDs
-/setoffset N - Set absolute offset value
-/batch - Process from given post to first post
-/cancel - Stop current processing
+**How to use batch mode:**
+1. Set offset if needed
+2. Send /batch
+3. Send starting post link (e.g. https://t.me/channel/123)
+4. Send ending post link (e.g. https://t.me/channel/456)
 
-Example link:
-https://t.me/public_channel/123
+The bot will process all posts between these two IDs.
 """
     await message.reply(help_text)
 
@@ -120,31 +121,30 @@ async def start_batch(client: Client, message: Message):
         return await message.reply("⚠️ Already processing, use /cancel to stop")
     
     Config.PROCESSING = True
+    Config.BATCH_MODE = True
+    Config.START_ID = None
+    Config.END_ID = None
+    Config.CHAT_ID = None
+    
     await message.reply(
         f"🔹 Batch Mode Started\n"
         f"🔢 Current Offset: {Config.OFFSET}\n\n"
-        f"Send me a post link to start from\n"
-        f"(I'll process from that post to the first post)\n\n"
-        f"Example:\n"
-        f"https://t.me/source_channel/123"
+        f"Please send the STARTING post link\n"
+        f"(e.g. https://t.me/channel/123)"
     )
 
 @app.on_message(filters.command("cancel"))
 async def cancel_cmd(client: Client, message: Message):
     Config.PROCESSING = False
+    Config.BATCH_MODE = False
     await message.reply("✅ Processing stopped")
 
-# Handle single posts and forwarded messages
-@app.on_message(filters.text & ~filters.command & filters.private)
-async def handle_single_post(client: Client, message: Message):
-    if "t.me/" in message.text:
-        # Process a single post link
-        await process_post_link(client, message)
-    elif message.forward_from_chat:
-        # Process forwarded message
-        await process_forwarded_message(client, message)
-
-async def process_post_link(client: Client, message: Message):
+# Handle all messages
+@app.on_message(filters.text & filters.private)
+async def handle_message(client: Client, message: Message):
+    if not Config.PROCESSING or "t.me/" not in message.text:
+        return
+    
     try:
         match = re.search(r't\.me/(?:c/)?([^/]+)/(\d+)', message.text)
         if not match:
@@ -153,45 +153,23 @@ async def process_post_link(client: Client, message: Message):
         chat_id = match.group(1)
         msg_id = int(match.group(2))
 
-        if Config.PROCESSING:
-            # Batch processing mode
-            progress_msg = await message.reply("⏳ Starting batch processing...")
-            processed = failed = 0
-            
-            current_id = msg_id
-            while Config.PROCESSING and current_id >= 1:
-                try:
-                    msg = await client.get_messages(chat_id, current_id)
-                    if msg and not msg.empty:
-                        if await process_message(client, msg):
-                            processed += 1
-                        else:
-                            failed += 1
-                    
-                    if (processed + failed) % 5 == 0:
-                        await progress_msg.edit(
-                            f"⏳ Progress: {processed} processed, {failed} failed\n"
-                            f"🔢 Current ID: {current_id}"
-                        )
-                    
-                    current_id -= 1
-                    await asyncio.sleep(1)
+        if Config.BATCH_MODE:
+            if Config.START_ID is None:
+                # First link (starting point)
+                Config.START_ID = msg_id
+                Config.CHAT_ID = chat_id
+                await message.reply(
+                    f"✅ Starting point set: {msg_id}\n"
+                    f"Now send the ENDING post link\n"
+                    f"(e.g. https://t.me/channel/456)"
+                )
+            elif Config.END_ID is None:
+                # Second link (ending point)
+                if chat_id != Config.CHAT_ID:
+                    return await message.reply("❌ Both links must be from same channel")
                 
-                except FloodWait as e:
-                    await asyncio.sleep(e.value)
-                    failed += 1
-                except Exception as e:
-                    print(f"Error getting message {current_id}: {e}")
-                    failed += 1
-                    continue
-            
-            await progress_msg.edit(
-                f"✅ Batch Complete!\n"
-                f"• Total Processed: {processed}\n"
-                f"• Failed: {failed}\n"
-                f"• Offset Applied: {Config.OFFSET}"
-            )
-            Config.PROCESSING = False
+                Config.END_ID = msg_id
+                await process_batch(client, message)
         else:
             # Single post processing
             msg = await client.get_messages(chat_id, msg_id)
@@ -199,18 +177,71 @@ async def process_post_link(client: Client, message: Message):
                 return await message.reply("❌ Couldn't fetch that message")
             
             await process_message(client, msg)
+            
     except Exception as e:
         await message.reply(f"❌ Error: {str(e)}")
         Config.PROCESSING = False
+        Config.BATCH_MODE = False
 
-async def process_forwarded_message(client: Client, message: Message):
+async def process_batch(client: Client, message: Message):
     try:
-        await process_message(client, message)
+        start_id = min(Config.START_ID, Config.END_ID)
+        end_id = max(Config.START_ID, Config.END_ID)
+        total = end_id - start_id + 1
+        
+        progress_msg = await message.reply(
+            f"⏳ Starting batch processing\n"
+            f"From ID: {start_id} to {end_id}\n"
+            f"Total posts: {total}\n"
+            f"Offset: {Config.OFFSET}"
+        )
+        
+        processed = failed = 0
+        
+        for current_id in range(start_id, end_id + 1):
+            if not Config.PROCESSING:
+                break
+            
+            try:
+                msg = await client.get_messages(Config.CHAT_ID, current_id)
+                if msg and not msg.empty:
+                    if await process_message(client, msg):
+                        processed += 1
+                    else:
+                        failed += 1
+                
+                if (processed + failed) % 5 == 0 or current_id == end_id:
+                    await progress_msg.edit(
+                        f"⏳ Processing: {current_id}/{end_id}\n"
+                        f"✅ Success: {processed}\n"
+                        f"❌ Failed: {failed}\n"
+                        f"📶 Progress: {((current_id-start_id)/total)*100:.1f}%"
+                    )
+                
+                await asyncio.sleep(1)
+            
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                failed += 1
+            except Exception as e:
+                print(f"Error processing {current_id}: {e}")
+                failed += 1
+        
+        await progress_msg.edit(
+            f"✅ Batch Complete!\n"
+            f"• Total Processed: {processed}\n"
+            f"• Failed: {failed}\n"
+            f"• Offset Applied: {Config.OFFSET}"
+        )
+    
     except Exception as e:
-        await message.reply(f"❌ Error processing forwarded message: {str(e)}")
+        await message.reply(f"❌ Batch Error: {str(e)}")
+    finally:
+        Config.PROCESSING = False
+        Config.BATCH_MODE = False
 
 if __name__ == "__main__":
-    print("⚡ Personal Link Modifier Bot Started!")
+    print("⚡ Ultimate Link Modifier Bot Started!")
     app.start()
     idle()
     app.stop()
