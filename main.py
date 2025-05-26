@@ -12,7 +12,6 @@ BOT_TOKEN = "7942215521:AAG5Zardlr7ULt2-yleqXeKjHKp4AQtVzd8"
 
 class Config:
     OFFSET = 0  # How much to add/subtract from message IDs in captions
-    PROCESSING = False
 
 app = Client(
     "caption_link_modifier",
@@ -132,16 +131,13 @@ async def set_offset_cmd(client: Client, message: Message):
     except:
         await message.reply("⚠️ Usage: /addnumber 2 or /lessnumber 3 or /setoffset 5")
 
-@app.on_message(filters.text & ~filters.command)
+# Fixed filter syntax - this is the key change
+def is_not_command(_, __, message: Message):
+    return not message.text.startswith('/')
+
+@app.on_message(filters.text & filters.create(is_not_command))
 async def handle_message(client: Client, message: Message):
-    if Config.PROCESSING:
-        return
-    
-    Config.PROCESSING = True
-    try:
-        await process_public_post(client, message)
-    finally:
-        Config.PROCESSING = False
+    await process_public_post(client, message)
 
 if __name__ == "__main__":
     print("⚡ Bot Started!")
