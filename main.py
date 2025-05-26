@@ -12,9 +12,11 @@ BOT_TOKEN = "7942215521:AAG5Zardlr7ULt2-yleqXeKjHKp4AQtVzd8"
 
 class Config:
     OFFSET = 0  # How much to add/subtract from message IDs in captions
+    PROCESSING = False
+    CURRENT_CHAT_ID = None
 
 app = Client(
-    "caption_link_modifier",
+    "batch_link_modifier",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
@@ -35,81 +37,66 @@ def modify_caption_links(text: str, offset: int) -> str:
     pattern = r'(https?://t\.me/(c/\d+|[\w-]+)/(\d+))'
     return re.sub(pattern, replacer, text)
 
-async def process_public_post(client: Client, message: Message):
+async def process_message(client: Client, message: Message, target_chat: str):
     try:
-        # Extract the public post link from message
-        if not message.text or "t.me/" not in message.text:
-            return await message.reply("Please send a valid Telegram post link")
-
-        match = re.search(r't\.me/(?:c/)?([^/]+)/(\d+)', message.text)
-        if not match:
-            return await message.reply("Invalid link format. Send like: https://t.me/channel/123")
-
-        chat_id = match.group(1)
-        msg_id = int(match.group(2))
-
-        # Get the original message
-        original_msg = await client.get_messages(chat_id, msg_id)
-        if not original_msg:
-            return await message.reply("Couldn't fetch that message")
-
-        # Process the message
-        if original_msg.media:
-            caption = original_msg.caption or ""
+        if message.media:
+            caption = message.caption or ""
             modified_caption = modify_caption_links(caption, Config.OFFSET)
             
-            if original_msg.media == MessageMediaType.PHOTO:
+            if message.media == MessageMediaType.PHOTO:
                 await client.send_photo(
-                    message.chat.id,
-                    original_msg.photo.file_id,
+                    target_chat,
+                    message.photo.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
-            elif original_msg.media == MessageMediaType.VIDEO:
+            elif message.media == MessageMediaType.VIDEO:
                 await client.send_video(
-                    message.chat.id,
-                    original_msg.video.file_id,
+                    target_chat,
+                    message.video.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
                 await client.send_document(
-                    message.chat.id,
-                    original_msg.document.file_id,
+                    target_chat,
+                    message.document.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
         else:
-            modified_text = modify_caption_links(original_msg.text, Config.OFFSET)
+            modified_text = modify_caption_links(message.text, Config.OFFSET)
             await client.send_message(
-                message.chat.id,
+                target_chat,
                 modified_text,
                 parse_mode=ParseMode.MARKDOWN
             )
-
-        await message.reply("✅ Post processed successfully!")
-
+        return True
+        
     except FloodWait as e:
+        print(f"Waiting {e.value} seconds due to flood limit")
         await asyncio.sleep(e.value)
-        await message.reply(f"⚠️ Please wait {e.value} seconds and try again")
+        return False
     except Exception as e:
-        await message.reply(f"❌ Error: {str(e)}")
+        print(f"Error processing message: {e}")
+        return False
 
 @app.on_message(filters.command(["start", "help"]))
 async def start_cmd(client: Client, message: Message):
     help_text = """
-🤖 **Simple Telegram Link Modifier Bot**
+🤖 **Batch Link Modifier Bot**
 
-🔹 Just send me a public channel post link
-🔹 I'll forward it with modified caption links
+🔹 /batch - Process all posts from a given link to latest
+🔹 /addnumber N - Add N to message IDs in captions
+🔹 /lessnumber N - Subtract N from message IDs
+🔹 /setoffset N - Set absolute offset value
+🔹 /cancel - Stop current processing
 
-⚙️ **Commands:**
-/addnumber N - Add N to message IDs in captions
-/lessnumber N - Subtract N from message IDs in captions
-/setoffset N - Set absolute offset value
-
-Example link:
-https://t.me/public_channel/123
+**How to use:**
+1. First set offset if needed
+2. Send /batch
+3. Send target chat (@username)
+4. Send source post link (https://t.me/channel/123)
 """
     await message.reply(help_text)
 
@@ -131,16 +118,100 @@ async def set_offset_cmd(client: Client, message: Message):
     except:
         await message.reply("⚠️ Usage: /addnumber 2 or /lessnumber 3 or /setoffset 5")
 
-# Fixed filter syntax - this is the key change
-def is_not_command(_, __, message: Message):
-    return not message.text.startswith('/')
+@app.on_message(filters.command("batch"))
+async def start_batch(client: Client, message: Message):
+    if Config.PROCESSING:
+        return await message.reply("⚠️ Processing already in progress")
+    
+    Config.PROCESSING = True
+    Config.CURRENT_CHAT_ID = message.chat.id
+    await message.reply(
+        f"🔹 Batch Mode Started\n"
+        f"🔢 Current Offset: {Config.OFFSET}\n\n"
+        f"Please send:\n"
+        f"1. Target chat username (where to forward)\n"
+        f"2. Source post link (starting point)\n\n"
+        f"Example:\n"
+        f"```\n"
+        f"@my_backup_channel\n"
+        f"https://t.me/source_channel/123\n"
+        f"```",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-@app.on_message(filters.text & filters.create(is_not_command))
-async def handle_message(client: Client, message: Message):
-    await process_public_post(client, message)
+@app.on_message(filters.command("cancel"))
+async def cancel_cmd(client: Client, message: Message):
+    Config.PROCESSING = False
+    await message.reply("✅ Processing stopped")
+
+# Handle batch input
+@app.on_message(filters.text & filters.private)
+async def handle_batch_input(client: Client, message: Message):
+    if not Config.PROCESSING or message.chat.id != Config.CURRENT_CHAT_ID:
+        return
+    
+    try:
+        parts = message.text.split('\n')
+        if len(parts) < 2:
+            return await message.reply("⚠️ Invalid format! Send:\n@target_channel\nhttps://t.me/source/123")
+        
+        target_chat = parts[0].strip()
+        source_link = parts[1].strip()
+        
+        match = re.search(r't\.me/(?:c/)?([^/]+)/(\d+)', source_link)
+        if not match:
+            return await message.reply("❌ Invalid Telegram link format")
+        
+        chat_id = match.group(1)
+        start_msg_id = int(match.group(2))
+        
+        progress_msg = await message.reply("⏳ Starting processing from this post to latest...")
+        processed = failed = 0
+        
+        # Process from given message to latest (message_id = 1)
+        current_id = start_msg_id
+        while Config.PROCESSING and current_id >= 1:
+            try:
+                msg = await client.get_messages(chat_id, current_id)
+                if msg and not msg.empty:
+                    if await process_message(client, msg, target_chat):
+                        processed += 1
+                    else:
+                        failed += 1
+                
+                if (processed + failed) % 5 == 0:
+                    await progress_msg.edit(
+                        f"⏳ Progress: {processed} processed, {failed} failed\n"
+                        f"🔢 Current ID: {current_id}\n"
+                        f"⚙️ Offset Applied: {Config.OFFSET}"
+                    )
+                
+                current_id -= 1
+                await asyncio.sleep(1)  # Rate limiting
+            
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                failed += 1
+            except Exception as e:
+                print(f"Error getting message {current_id}: {e}")
+                failed += 1
+                continue
+        
+        await progress_msg.edit(
+            f"✅ Batch Complete!\n"
+            f"• Total Processed: {processed}\n"
+            f"• Failed: {failed}\n"
+            f"• Final Offset Applied: {Config.OFFSET}"
+        )
+    
+    except Exception as e:
+        await message.reply(f"❌ Error: {str(e)}")
+    finally:
+        Config.PROCESSING = False
+        Config.CURRENT_CHAT_ID = None
 
 if __name__ == "__main__":
-    print("⚡ Bot Started!")
+    print("⚡ Batch Processing Bot Started!")
     app.start()
     idle()
     app.stop()
