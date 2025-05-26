@@ -13,6 +13,14 @@ from pyrogram.types import (
 )
 from pyrogram.enums import ParseMode, MessageMediaType
 from config import API_ID, API_HASH, BOT_TOKEN, TARGET_CHANNEL
+# MongoDB connection
+from motor.motor_asyncio import AsyncIOMotorClient
+
+MONGO_URI = "mongodb+srv://lecocita:pQx2GGUZtQSPhjMx@cluster0.oz5kyow.mongodb.net/telegrambot?retryWrites=true&w=majority&appName=Cluster0"
+
+# Connect MongoDB and select default database
+mongo = AsyncIOMotorClient(MONGO_URI)
+db = mongo.get_default_database() or mongo["telegrambot"]
 
 # Initialize Pyrogram Client
 app = Client(
