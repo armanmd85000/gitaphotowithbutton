@@ -1,4 +1,5 @@
 import re
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.enums import ParseMode, MessageMediaType
@@ -18,8 +19,7 @@ app = Client("link_modifier_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BO
 
 def modify_only_caption_links(text: str, offset: int) -> str:
     """
-    सिर्फ कैप्शन में मौजूद टेलीग्राम लिंक्स को मॉडिफाई करेगा
-    मीडिया सोर्स लिंक को छोड़ देगा
+    Only modifies Telegram links in captions, leaves media source links unchanged
     """
     if not text:
         return text
@@ -30,56 +30,47 @@ def modify_only_caption_links(text: str, offset: int) -> str:
         msg_id = match.group(3)
         return f"{url}{chat}/{int(msg_id) + offset}"
 
-    # सिर्फ t.me/c/... और t.me/username/... वाले लिंक्स को टारगेट करेगा
     pattern = r'(https?://t\.me/(c/\d+|[\w-]+)/(\d+))'
     return re.sub(pattern, offset_applier, text)
 
 async def process_single_message(client: Client, message: Message):
     try:
-        # मीडिया फॉरवर्ड करने का लॉजिक
         if message.media:
+            caption = message.caption or ""
+            modified_caption = modify_only_caption_links(caption, Config.OFFSET)
+            
             if message.media == MessageMediaType.PHOTO:
                 sent_msg = await client.send_photo(
                     Config.TARGET_CHAT,
                     message.photo.file_id,
-                    caption=modify_only_caption_links(message.caption, Config.OFFSET),
+                    caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
             elif message.media == MessageMediaType.VIDEO:
                 sent_msg = await client.send_video(
                     Config.TARGET_CHAT,
                     message.video.file_id,
-                    caption=modify_only_caption_links(message.caption, Config.OFFSET),
+                    caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
                 sent_msg = await client.send_document(
                     Config.TARGET_CHAT,
                     message.document.file_id,
-                    caption=modify_only_caption_links(message.caption, Config.OFFSET),
+                    caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
         else:
+            modified_text = modify_only_caption_links(message.text, Config.OFFSET)
             sent_msg = await client.send_message(
                 Config.TARGET_CHAT,
-                modify_only_caption_links(message.text, Config.OFFSET),
+                modified_text,
                 parse_mode=ParseMode.MARKDOWN
             )
-        
-        # डीबगिंग के लिए लॉग
-        debug_info = (
-            f"✅ Processed\n"
-            f"Original ID: {message.id}\n"
-            f"Original Link: {message.link}\n"
-            f"Caption Links Modified: {Config.OFFSET}\n"
-            f"New Message: {sent_msg.link}"
-        )
-        await client.send_message("me", debug_info)
         return True
         
     except Exception as e:
-        error_msg = f"❌ Error in message {message.id}\nError: {str(e)}"
-        await client.send_message("me", error_msg)
+        print(f"Error processing message: {e}")
         return False
 
 @app.on_message(filters.command(["addnumber", "lessnumber"]))
@@ -88,19 +79,19 @@ async def set_offset_cmd(client: Client, message: Message):
         amount = int(message.command[1])
         if message.command[0] == "addnumber":
             Config.OFFSET += amount
-            action = "जोड़ा गया"
+            action = "added"
         else:
             Config.OFFSET -= amount
-            action = "घटाया गया"
+            action = "subtracted"
         
-        await message.reply(f"✅ ऑफसेट {action}: {amount}\nनया ऑफसेट: {Config.OFFSET}")
+        await message.reply(f"✅ Offset {action}: {amount}\nNew offset: {Config.OFFSET}")
     except:
-        await message.reply("⚠️ उपयोग: /addnumber 2 या /lessnumber 3")
+        await message.reply("⚠️ Usage: /addnumber 2 or /lessnumber 3")
 
 @app.on_message(filters.command("startbatch"))
 async def start_batch(client: Client, message: Message):
     if Config.PROCESSING:
-        return await message.reply("⚠️ पहले से प्रोसेस चल रहा है")
+        return await message.reply("⚠️ Processing already in progress")
     
     Config.PROCESSING = True
     args = message.text.split()
@@ -112,38 +103,35 @@ async def start_batch(client: Client, message: Message):
             pass
     
     await message.reply(
-        f"🔹 बैच प्रोसेसिंग शुरू\n"
-        f"📌 लिमिट: {Config.EXTRACT_LIMIT} मैसेज\n"
-        f"🔢 ऑफसेट: {Config.OFFSET}\n\n"
-        f"अब निम्न फॉर्मेट में मैसेज भेजें:\n"
-        f"`टारगेट_चैनल @username\n"
-        f"सोर्स_पोस्ट_लिंक https://t.me/...`"
+        f"🔹 Batch processing started\n"
+        f"📌 Limit: {Config.EXTRACT_LIMIT} messages\n"
+        f"🔢 Offset: {Config.OFFSET}\n\n"
+        f"Now send in this format:\n"
+        f"`target_channel @username\n"
+        f"source_post_link https://t.me/...`"
     )
 
-@app.on_message(filters.text & ~filters.command & filters.incoming)
+@app.on_message(filters.text & filters.incoming & ~filters.command)
 async def handle_batch_input(client: Client, message: Message):
     if not Config.PROCESSING:
         return
     
     try:
-        # टारगेट चैनल और सोर्स लिंक पार्स करें
         parts = message.text.split('\n')
         if len(parts) < 2:
-            return await message.reply("⚠️ गलत फॉर्मेट! उदाहरण:\n@target_channel\nhttps://t.me/source/123")
+            return await message.reply("⚠️ Wrong format! Example:\n@target_channel\nhttps://t.me/source/123")
         
         Config.TARGET_CHAT = parts[0].strip()
         source_link = parts[1].strip()
         
-        # सोर्स लिंक से चैट और मैसेज ID निकालें
         match = re.search(r't\.me/(?:c/)?(\d+|\w+)/(\d+)', source_link)
         if not match:
-            return await message.reply("❌ अमान्य टेलीग्राम लिंक")
+            return await message.reply("❌ Invalid Telegram link")
         
         chat_id = match.group(1)
         start_id = int(match.group(2))
         
-        # प्रोसेसिंग शुरू
-        progress_msg = await message.reply("⏳ प्रोसेसिंग शुरू...")
+        progress_msg = await message.reply("⏳ Processing started...")
         success = failed = 0
         
         for i in range(Config.EXTRACT_LIMIT):
@@ -160,27 +148,25 @@ async def handle_batch_input(client: Client, message: Message):
                     else:
                         failed += 1
                 
-                # हर 5 मैसेज पर अपडेट
                 if (success + failed) % 5 == 0:
                     await progress_msg.edit(
-                        f"⏳ प्रोग्रेस: {success + failed}/{Config.EXTRACT_LIMIT}\n"
-                        f"✅ सफल: {success}\n"
-                        f"❌ फेल: {failed}"
+                        f"⏳ Progress: {success + failed}/{Config.EXTRACT_LIMIT}\n"
+                        f"✅ Success: {success}\n"
+                        f"❌ Failed: {failed}"
                     )
                 
-                await asyncio.sleep(1)  # रेट लिमिटिंग
+                await asyncio.sleep(1)
             
             except Exception as e:
                 failed += 1
                 continue
         
-        # कंप्लीट रिपोर्ट
         await progress_msg.edit(
-            f"🎉 प्रोसेसिंग पूरी!\n"
-            f"• कुल मैसेज: {success + failed}\n"
-            f"• सफल: {success}\n"
-            f"• फेल: {failed}\n"
-            f"• लागू ऑफसेट: {Config.OFFSET}"
+            f"🎉 Processing complete!\n"
+            f"• Total: {success + failed}\n"
+            f"• Success: {success}\n"
+            f"• Failed: {failed}\n"
+            f"• Applied offset: {Config.OFFSET}"
         )
     
     finally:
@@ -190,8 +176,8 @@ async def handle_batch_input(client: Client, message: Message):
 @app.on_message(filters.command("cancel"))
 async def cancel_processing(client: Client, message: Message):
     Config.PROCESSING = False
-    await message.reply("❌ प्रोसेसिंग रद्द की गई")
+    await message.reply("❌ Processing cancelled")
 
 if __name__ == "__main__":
-    print("⚡ बॉट स्टार्ट हुआ!")
+    print("⚡ Bot started!")
     app.run()
