@@ -13,10 +13,9 @@ BOT_TOKEN = "7942215521:AAG5Zardlr7ULt2-yleqXeKjHKp4AQtVzd8"
 class Config:
     OFFSET = 0  # How much to add/subtract from message IDs in captions
     PROCESSING = False
-    CURRENT_CHAT_ID = None
 
 app = Client(
-    "batch_link_modifier",
+    "personal_link_modifier",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
@@ -33,41 +32,37 @@ def modify_caption_links(text: str, offset: int) -> str:
         msg_id = match.group(3)
         return f"{url}{chat}/{int(msg_id) + offset}"
 
-    # This pattern matches t.me/.../123 links but not media source links
+    # This pattern matches t.me/.../123 links in captions
     pattern = r'(https?://t\.me/(c/\d+|[\w-]+)/(\d+))'
     return re.sub(pattern, replacer, text)
 
-async def process_message(client: Client, message: Message, target_chat: str):
+async def process_message(client: Client, message: Message):
     try:
         if message.media:
             caption = message.caption or ""
             modified_caption = modify_caption_links(caption, Config.OFFSET)
             
             if message.media == MessageMediaType.PHOTO:
-                await client.send_photo(
-                    target_chat,
+                await message.reply_photo(
                     message.photo.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
             elif message.media == MessageMediaType.VIDEO:
-                await client.send_video(
-                    target_chat,
+                await message.reply_video(
                     message.video.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
-                await client.send_document(
-                    target_chat,
+                await message.reply_document(
                     message.document.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
         else:
             modified_text = modify_caption_links(message.text, Config.OFFSET)
-            await client.send_message(
-                target_chat,
+            await message.reply(
                 modified_text,
                 parse_mode=ParseMode.MARKDOWN
             )
@@ -84,19 +79,20 @@ async def process_message(client: Client, message: Message, target_chat: str):
 @app.on_message(filters.command(["start", "help"]))
 async def start_cmd(client: Client, message: Message):
     help_text = """
-🤖 **Batch Link Modifier Bot**
+🤖 **Personal Link Modifier Bot**
 
-🔹 /batch - Process all posts from a given link to latest
-🔹 /addnumber N - Add N to message IDs in captions
-🔹 /lessnumber N - Subtract N from message IDs
-🔹 /setoffset N - Set absolute offset value
-🔹 /cancel - Stop current processing
+🔹 Send me a post link or forward posts to me
+🔹 I'll modify Telegram links in captions
 
-**How to use:**
-1. First set offset if needed
-2. Send /batch
-3. Send target chat (@username)
-4. Send source post link (https://t.me/channel/123)
+⚙️ **Commands:**
+/addnumber N - Add N to message IDs in captions
+/lessnumber N - Subtract N from message IDs
+/setoffset N - Set absolute offset value
+/batch - Process from given post to first post
+/cancel - Stop current processing
+
+Example link:
+https://t.me/public_channel/123
 """
     await message.reply(help_text)
 
@@ -121,22 +117,16 @@ async def set_offset_cmd(client: Client, message: Message):
 @app.on_message(filters.command("batch"))
 async def start_batch(client: Client, message: Message):
     if Config.PROCESSING:
-        return await message.reply("⚠️ Processing already in progress")
+        return await message.reply("⚠️ Already processing, use /cancel to stop")
     
     Config.PROCESSING = True
-    Config.CURRENT_CHAT_ID = message.chat.id
     await message.reply(
         f"🔹 Batch Mode Started\n"
         f"🔢 Current Offset: {Config.OFFSET}\n\n"
-        f"Please send:\n"
-        f"1. Target chat username (where to forward)\n"
-        f"2. Source post link (starting point)\n\n"
+        f"Send me a post link to start from\n"
+        f"(I'll process from that post to the first post)\n\n"
         f"Example:\n"
-        f"```\n"
-        f"@my_backup_channel\n"
-        f"https://t.me/source_channel/123\n"
-        f"```",
-        parse_mode=ParseMode.MARKDOWN
+        f"https://t.me/source_channel/123"
     )
 
 @app.on_message(filters.command("cancel"))
@@ -144,74 +134,83 @@ async def cancel_cmd(client: Client, message: Message):
     Config.PROCESSING = False
     await message.reply("✅ Processing stopped")
 
-# Handle batch input
-@app.on_message(filters.text & filters.private)
-async def handle_batch_input(client: Client, message: Message):
-    if not Config.PROCESSING or message.chat.id != Config.CURRENT_CHAT_ID:
-        return
-    
+# Handle single posts and forwarded messages
+@app.on_message(filters.text & ~filters.command & filters.private)
+async def handle_single_post(client: Client, message: Message):
+    if "t.me/" in message.text:
+        # Process a single post link
+        await process_post_link(client, message)
+    elif message.forward_from_chat:
+        # Process forwarded message
+        await process_forwarded_message(client, message)
+
+async def process_post_link(client: Client, message: Message):
     try:
-        parts = message.text.split('\n')
-        if len(parts) < 2:
-            return await message.reply("⚠️ Invalid format! Send:\n@target_channel\nhttps://t.me/source/123")
-        
-        target_chat = parts[0].strip()
-        source_link = parts[1].strip()
-        
-        match = re.search(r't\.me/(?:c/)?([^/]+)/(\d+)', source_link)
+        match = re.search(r't\.me/(?:c/)?([^/]+)/(\d+)', message.text)
         if not match:
-            return await message.reply("❌ Invalid Telegram link format")
-        
+            return await message.reply("❌ Invalid link format. Send like: https://t.me/channel/123")
+
         chat_id = match.group(1)
-        start_msg_id = int(match.group(2))
-        
-        progress_msg = await message.reply("⏳ Starting processing from this post to latest...")
-        processed = failed = 0
-        
-        # Process from given message to latest (message_id = 1)
-        current_id = start_msg_id
-        while Config.PROCESSING and current_id >= 1:
-            try:
-                msg = await client.get_messages(chat_id, current_id)
-                if msg and not msg.empty:
-                    if await process_message(client, msg, target_chat):
-                        processed += 1
-                    else:
-                        failed += 1
-                
-                if (processed + failed) % 5 == 0:
-                    await progress_msg.edit(
-                        f"⏳ Progress: {processed} processed, {failed} failed\n"
-                        f"🔢 Current ID: {current_id}\n"
-                        f"⚙️ Offset Applied: {Config.OFFSET}"
-                    )
-                
-                current_id -= 1
-                await asyncio.sleep(1)  # Rate limiting
+        msg_id = int(match.group(2))
+
+        if Config.PROCESSING:
+            # Batch processing mode
+            progress_msg = await message.reply("⏳ Starting batch processing...")
+            processed = failed = 0
             
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
-                failed += 1
-            except Exception as e:
-                print(f"Error getting message {current_id}: {e}")
-                failed += 1
-                continue
-        
-        await progress_msg.edit(
-            f"✅ Batch Complete!\n"
-            f"• Total Processed: {processed}\n"
-            f"• Failed: {failed}\n"
-            f"• Final Offset Applied: {Config.OFFSET}"
-        )
-    
+            current_id = msg_id
+            while Config.PROCESSING and current_id >= 1:
+                try:
+                    msg = await client.get_messages(chat_id, current_id)
+                    if msg and not msg.empty:
+                        if await process_message(client, msg):
+                            processed += 1
+                        else:
+                            failed += 1
+                    
+                    if (processed + failed) % 5 == 0:
+                        await progress_msg.edit(
+                            f"⏳ Progress: {processed} processed, {failed} failed\n"
+                            f"🔢 Current ID: {current_id}"
+                        )
+                    
+                    current_id -= 1
+                    await asyncio.sleep(1)
+                
+                except FloodWait as e:
+                    await asyncio.sleep(e.value)
+                    failed += 1
+                except Exception as e:
+                    print(f"Error getting message {current_id}: {e}")
+                    failed += 1
+                    continue
+            
+            await progress_msg.edit(
+                f"✅ Batch Complete!\n"
+                f"• Total Processed: {processed}\n"
+                f"• Failed: {failed}\n"
+                f"• Offset Applied: {Config.OFFSET}"
+            )
+            Config.PROCESSING = False
+        else:
+            # Single post processing
+            msg = await client.get_messages(chat_id, msg_id)
+            if not msg:
+                return await message.reply("❌ Couldn't fetch that message")
+            
+            await process_message(client, msg)
     except Exception as e:
         await message.reply(f"❌ Error: {str(e)}")
-    finally:
         Config.PROCESSING = False
-        Config.CURRENT_CHAT_ID = None
+
+async def process_forwarded_message(client: Client, message: Message):
+    try:
+        await process_message(client, message)
+    except Exception as e:
+        await message.reply(f"❌ Error processing forwarded message: {str(e)}")
 
 if __name__ == "__main__":
-    print("⚡ Batch Processing Bot Started!")
+    print("⚡ Personal Link Modifier Bot Started!")
     app.start()
     idle()
     app.stop()
