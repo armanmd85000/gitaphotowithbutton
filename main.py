@@ -1,8 +1,10 @@
 import re
 import asyncio
+import time
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.enums import ParseMode, MessageMediaType
+from threading import Thread
 
 # Bot Config
 API_ID = 20219694
@@ -14,13 +16,12 @@ class Config:
     PROCESSING = False
     EXTRACT_LIMIT = 100
     TARGET_CHAT = None
+    ACTIVE = True
 
 app = Client("link_modifier_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 def modify_only_caption_links(text: str, offset: int) -> str:
-    """
-    Only modifies Telegram links in captions, leaves media source links unchanged
-    """
+    """Only modifies Telegram links in captions, leaves media source links unchanged"""
     if not text:
         return text
 
@@ -40,21 +41,21 @@ async def process_single_message(client: Client, message: Message):
             modified_caption = modify_only_caption_links(caption, Config.OFFSET)
             
             if message.media == MessageMediaType.PHOTO:
-                sent_msg = await client.send_photo(
+                await client.send_photo(
                     Config.TARGET_CHAT,
                     message.photo.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
             elif message.media == MessageMediaType.VIDEO:
-                sent_msg = await client.send_video(
+                await client.send_video(
                     Config.TARGET_CHAT,
                     message.video.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
-                sent_msg = await client.send_document(
+                await client.send_document(
                     Config.TARGET_CHAT,
                     message.document.file_id,
                     caption=modified_caption,
@@ -62,7 +63,7 @@ async def process_single_message(client: Client, message: Message):
                 )
         else:
             modified_text = modify_only_caption_links(message.text, Config.OFFSET)
-            sent_msg = await client.send_message(
+            await client.send_message(
                 Config.TARGET_CHAT,
                 modified_text,
                 parse_mode=ParseMode.MARKDOWN
@@ -111,11 +112,10 @@ async def start_batch(client: Client, message: Message):
         f"source_post_link https://t.me/...`"
     )
 
-# Corrected filter syntax - this is the key fix
-def non_command_filter(_, __, message: Message):
+def is_not_command(_, __, message: Message):
     return not message.text.startswith('/')
 
-@app.on_message(filters.text & filters.incoming & filters.create(non_command_filter))
+@app.on_message(filters.text & filters.incoming & filters.create(is_not_command))
 async def handle_batch_input(client: Client, message: Message):
     if not Config.PROCESSING:
         return
@@ -182,6 +182,12 @@ async def cancel_processing(client: Client, message: Message):
     Config.PROCESSING = False
     await message.reply("❌ Processing cancelled")
 
+def keep_alive():
+    while Config.ACTIVE:
+        time.sleep(300)  # Ping every 5 minutes to prevent idle shutdown
+
 if __name__ == "__main__":
     print("⚡ Bot started!")
+    # Start keep-alive thread
+    Thread(target=keep_alive, daemon=True).start()
     app.run()
