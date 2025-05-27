@@ -51,30 +51,38 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
             
             if source_msg.media == MessageMediaType.PHOTO:
                 await client.send_photo(
-                    target_chat_id,
-                    source_msg.photo.file_id,
+                    chat_id=target_chat_id,
+                    photo=source_msg.photo.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
             elif source_msg.media == MessageMediaType.VIDEO:
                 await client.send_video(
-                    target_chat_id,
-                    source_msg.video.file_id,
+                    chat_id=target_chat_id,
+                    video=source_msg.video.file_id,
+                    caption=modified_caption,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            elif source_msg.media == MessageMediaType.DOCUMENT:
+                await client.send_document(
+                    chat_id=target_chat_id,
+                    document=source_msg.document.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
+                # For other media types, try to send as document
                 await client.send_document(
-                    target_chat_id,
-                    source_msg.document.file_id,
+                    chat_id=target_chat_id,
+                    document=source_msg.document.file_id,
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
         else:
             modified_text = modify_telegram_links(source_msg.text, Config.OFFSET)
             await client.send_message(
-                target_chat_id,
-                modified_text,
+                chat_id=target_chat_id,
+                text=modified_text,
                 parse_mode=ParseMode.MARKDOWN
             )
         return True
@@ -84,7 +92,7 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
         await asyncio.sleep(e.value)
         return False
     except Exception as e:
-        print(f"Error processing message: {e}")
+        print(f"Error processing message {source_msg.id}: {e}")
         return False
 
 @app.on_message(filters.command(["start", "help"]))
@@ -150,7 +158,6 @@ async def cancel_cmd(client: Client, message: Message):
     Config.BATCH_MODE = False
     await message.reply("✅ Processing stopped")
 
-# Handle all messages
 @app.on_message(filters.text & filters.create(is_not_command))
 async def handle_message(client: Client, message: Message):
     if not Config.PROCESSING or "t.me/" not in message.text:
