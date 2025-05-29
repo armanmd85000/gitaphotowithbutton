@@ -1,9 +1,10 @@
 import re
 import asyncio
+from typing import Optional, Tuple
 from pyrogram import Client, filters, idle
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode, MessageMediaType
-from pyrogram.errors import FloodWait, RPCError
+from pyrogram.errors import FloodWait, RPCError, MessageIdInvalid, ChannelInvalid
 
 # Bot Configuration
 API_ID = 20219694
@@ -18,54 +19,61 @@ class Config:
     START_ID = None
     END_ID = None
     CURRENT_TASK = None
+    REPLACEMENTS = {
+        "word": "replaceword",
+        "example": "sample",
+        "hello": "hi"
+    }
 
 app = Client(
-    "batch_link_modifier",
+    "advanced_batch_link_modifier",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
 )
 
-def is_not_command(_, __, message: Message):
+def is_not_command(_, __, message: Message) -> bool:
     return not message.text.startswith('/')
 
-def modify_telegram_links(text: str, offset: int) -> str:
+def modify_content(text: str, offset: int) -> str:
     if not text:
         return text
 
+    # Apply word replacements
+    for original, replacement in Config.REPLACEMENTS.items():
+        text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
+
+    # Modify Telegram links
     def replacer(match):
         full_url = match.group(0)
         msg_id = int(match.group(2))
         return full_url.replace(f"/{msg_id}", f"/{msg_id + offset}")
 
-    pattern = r'https?://(?:t\.me|telegram\.me)/(?:c/)?([^/]+)/(\d+)'
+    pattern = r'https?://(?:t\.me|telegram\.(?:me|dog))/(?:c/)?([^/]+)/(\d+)'
     return re.sub(pattern, replacer, text)
 
-async def process_message(client: Client, source_msg: Message, target_chat_id: int):
+async def process_message(client: Client, source_msg: Message, target_chat_id: int) -> bool:
     try:
         if source_msg.media:
             caption = source_msg.caption or ""
-            modified_caption = modify_telegram_links(caption, Config.OFFSET)
+            modified_caption = modify_content(caption, Config.OFFSET)
             
-            if source_msg.media == MessageMediaType.PHOTO:
-                await client.send_photo(
+            media_mapping = {
+                MessageMediaType.PHOTO: client.send_photo,
+                MessageMediaType.VIDEO: client.send_video,
+                MessageMediaType.DOCUMENT: client.send_document,
+                MessageMediaType.AUDIO: client.send_audio,
+                MessageMediaType.ANIMATION: client.send_animation,
+                MessageMediaType.VOICE: client.send_voice,
+                MessageMediaType.VIDEO_NOTE: client.send_video_note,
+                MessageMediaType.STICKER: client.send_sticker
+            }
+            
+            if source_msg.media in media_mapping:
+                await media_mapping[source_msg.media](
                     chat_id=target_chat_id,
-                    photo=source_msg.photo.file_id,
-                    caption=modified_caption,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            elif source_msg.media == MessageMediaType.VIDEO:
-                await client.send_video(
-                    chat_id=target_chat_id,
-                    video=source_msg.video.file_id,
-                    caption=modified_caption,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            elif source_msg.media == MessageMediaType.DOCUMENT:
-                await client.send_document(
-                    chat_id=target_chat_id,
-                    document=source_msg.document.file_id,
-                    caption=modified_caption,
+                    **{source_msg.media.value: getattr(source_msg, source_msg.media.value).file_id},
+                    caption=modified_caption if source_msg.media != MessageMediaType.STICKER else None,
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
@@ -77,7 +85,7 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
                     parse_mode=ParseMode.MARKDOWN
                 )
         else:
-            modified_text = modify_telegram_links(source_msg.text, Config.OFFSET)
+            modified_text = modify_content(source_msg.text, Config.OFFSET)
             await client.send_message(
                 chat_id=target_chat_id,
                 text=modified_text,
@@ -96,15 +104,26 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
         print(f"Unexpected error processing message {source_msg.id}: {e}")
         return False
 
+def parse_message_link(text: str) -> Optional[Tuple[str, int]]:
+    match = re.search(
+        r't\.me/(?:c/)?([^/]+)/(\d+)',
+        text.split('?')[0]  # Remove URL parameters
+    )
+    if not match:
+        return None
+    return match.group(1), int(match.group(2))
+
 @app.on_message(filters.command(["start", "help"]))
 async def start_cmd(client: Client, message: Message):
     help_text = """
-🤖 **Batch Link Modifier Bot**
+🤖 **Advanced Batch Link Modifier Bot**
 
 🔹 /batch - Process all posts between two links
 🔹 /addnumber N - Add N to message IDs in captions
 🔹 /lessnumber N - Subtract N from message IDs
 🔹 /setoffset N - Set absolute offset value
+🔹 /replacewords - View current word replacements
+🔹 /addreplace WORD REPLACEMENT - Add word replacement
 🔹 /stop - Stop current processing
 
 **How to use batch mode:**
@@ -139,6 +158,35 @@ async def set_offset_cmd(client: Client, message: Message):
     except ValueError:
         await message.reply("⚠️ Please provide a valid number")
 
+@app.on_message(filters.command("replacewords"))
+async def show_replacements(client: Client, message: Message):
+    if not Config.REPLACEMENTS:
+        return await message.reply("No word replacements set yet.")
+    
+    replacements_text = "\n".join(
+        f"• `{original}` → `{replacement}`"
+        for original, replacement in Config.REPLACEMENTS.items()
+    )
+    await message.reply(
+        f"🔤 Current Word Replacements:\n\n{replacements_text}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+@app.on_message(filters.command("addreplace"))
+async def add_replacement(client: Client, message: Message):
+    if len(message.command) < 3:
+        return await message.reply("⚠️ Usage: /addreplace ORIGINAL REPLACEMENT")
+    
+    original = message.command[1].lower()
+    replacement = ' '.join(message.command[2:])
+    
+    Config.REPLACEMENTS[original] = replacement
+    await message.reply(
+        f"✅ Added replacement:\n"
+        f"`{original}` → `{replacement}`",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 @app.on_message(filters.command("batch"))
 async def start_batch(client: Client, message: Message):
     if Config.PROCESSING:
@@ -152,7 +200,8 @@ async def start_batch(client: Client, message: Message):
     
     await message.reply(
         f"🔹 Batch Mode Started\n"
-        f"🔢 Current Offset: {Config.OFFSET}\n\n"
+        f"🔢 Current Offset: {Config.OFFSET}\n"
+        f"🔤 Word Replacements: {len(Config.REPLACEMENTS)}\n\n"
         f"Please REPLY to the FIRST message you want to process\n"
         f"or send its link (e.g. https://t.me/channel/123)"
     )
@@ -178,14 +227,11 @@ async def handle_message(client: Client, message: Message):
             source_msg = message.reply_to_message
             chat_id = source_msg.chat.username or f"-100{source_msg.chat.id}"
             msg_id = source_msg.id
-        elif "t.me/" in message.text:
-            match = re.search(r't\.me/(?:c/)?([^/]+)/(\d+)', message.text)
-            if not match:
-                return await message.reply("❌ Invalid link format. Send like: https://t.me/channel/123")
-            chat_id = match.group(1)
-            msg_id = int(match.group(2))
         else:
-            return await message.reply("❌ Please reply to a message or send a message link")
+            link_info = parse_message_link(message.text)
+            if not link_info:
+                return await message.reply("❌ Invalid link format. Send like: https://t.me/channel/123")
+            chat_id, msg_id = link_info
 
         if Config.BATCH_MODE:
             if Config.START_ID is None:
@@ -203,11 +249,14 @@ async def handle_message(client: Client, message: Message):
                 Config.END_ID = msg_id
                 Config.CURRENT_TASK = asyncio.create_task(process_batch(client, message))
         else:
-            msg = await client.get_messages(chat_id, msg_id)
-            if not msg or msg.empty:
-                return await message.reply("❌ Couldn't fetch that message")
-            
-            await process_message(client, msg, message.chat.id)
+            try:
+                msg = await client.get_messages(chat_id, msg_id)
+                if not msg or msg.empty:
+                    return await message.reply("❌ Couldn't fetch that message")
+                
+                await process_message(client, msg, message.chat.id)
+            except (MessageIdInvalid, ChannelInvalid):
+                return await message.reply("❌ Invalid message or channel. Make sure the bot has access.")
             
     except Exception as e:
         await message.reply(f"❌ Error: {str(e)}")
@@ -225,10 +274,12 @@ async def process_batch(client: Client, message: Message):
             f"Chat: {Config.CHAT_ID}\n"
             f"From ID: {start_id} to {end_id}\n"
             f"Total messages: {total}\n"
-            f"Offset: {Config.OFFSET}"
+            f"Offset: {Config.OFFSET}\n"
+            f"Replacements: {len(Config.REPLACEMENTS)}"
         )
         
         processed = failed = 0
+        last_update = 0
         
         for current_id in range(start_id, end_id + 1):
             if not Config.PROCESSING:
@@ -244,22 +295,28 @@ async def process_batch(client: Client, message: Message):
                         failed += 1
                 
                 # Update progress every 5 messages or at the end
-                if (processed + failed) % 5 == 0 or current_id == end_id:
+                now = asyncio.get_event_loop().time()
+                if (processed + failed) % 5 == 0 or current_id == end_id or now - last_update > 10:
                     try:
                         await progress_msg.edit(
                             f"⏳ Processing: {current_id}/{end_id}\n"
                             f"✅ Success: {processed}\n"
                             f"❌ Failed: {failed}\n"
-                            f"📶 Progress: {((current_id-start_id)/total)*100:.1f}%"
+                            f"📶 Progress: {((current_id-start_id)/total)*100:.1f}%\n"
+                            f"⏱️ Speed: {(processed + failed)/(now - last_update + 0.1):.1f} msg/s"
                         )
+                        last_update = now
                     except:
                         pass
                 
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)  # Reduced sleep time for better performance
             
             except FloodWait as e:
                 await asyncio.sleep(e.value)
                 failed += 1
+            except (MessageIdInvalid, ChannelInvalid):
+                failed += 1
+                await asyncio.sleep(1)
             except RPCError as e:
                 print(f"RPCError processing {current_id}: {e}")
                 failed += 1
@@ -269,13 +326,19 @@ async def process_batch(client: Client, message: Message):
                 failed += 1
         
         if Config.PROCESSING:  # Only send completion if not stopped
-            await progress_msg.edit(
+            completion_text = (
                 f"✅ Batch Complete!\n"
                 f"• Total messages: {total}\n"
                 f"• Successfully processed: {processed}\n"
                 f"• Failed: {failed}\n"
-                f"• Offset Applied: {Config.OFFSET}"
+                f"• Offset Applied: {Config.OFFSET}\n"
+                f"• Word Replacements: {len(Config.REPLACEMENTS)}"
             )
+            
+            if failed > 0:
+                completion_text += "\n\n⚠️ Some messages failed. Check bot logs for details."
+            
+            await progress_msg.edit(completion_text)
     
     except asyncio.CancelledError:
         await message.reply("🛑 Batch processing stopped by user")
@@ -287,7 +350,7 @@ async def process_batch(client: Client, message: Message):
         Config.CURRENT_TASK = None
 
 if __name__ == "__main__":
-    print("⚡ Batch Link Modifier Bot Started!")
+    print("⚡ Advanced Batch Link Modifier Bot Started!")
     try:
         app.start()
         idle()
