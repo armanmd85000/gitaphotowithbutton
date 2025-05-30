@@ -3,8 +3,8 @@ import asyncio
 from typing import Optional, Tuple, Dict
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.enums import ParseMode, MessageMediaType
-from pyrogram.errors import FloodWait, RPCError, MessageIdInvalid, ChannelInvalid
+from pyrogram.enums import ParseMode, MessageMediaType, ChatType
+from pyrogram.errors import FloodWait, RPCError, MessageIdInvalid, ChannelInvalid, ChatAdminRequired
 
 # Bot Configuration
 API_ID = 20219694
@@ -110,6 +110,21 @@ def parse_message_link(text: str) -> Optional[Tuple[str, int]]:
         return None
     return match.group(1), int(match.group(2))
 
+async def verify_chat_access(client: Client, chat_id: str) -> bool:
+    try:
+        chat = await client.get_chat(chat_id)
+        if chat.type in [ChatType.CHANNEL, ChatType.GROUP, ChatType.SUPERGROUP]:
+            member = await client.get_chat_member(chat.id, "me")
+            if not member.privileges:
+                return False
+            if chat.type == ChatType.CHANNEL:
+                return member.privileges.can_post_messages
+            return True
+        return True
+    except Exception as e:
+        print(f"Error verifying chat access: {e}")
+        return False
+
 @app.on_message(filters.command(["start", "help"]))
 async def start_cmd(client: Client, message: Message):
     help_text = """
@@ -134,6 +149,10 @@ async def start_cmd(client: Client, message: Message):
 5. The bot will process all messages in between
 
 Alternatively, you can send message links instead of replying.
+
+**Note for Private Channels:**
+- The bot must be admin in both source and target channels
+- Must have 'Post Messages' permission in target channel
 """
     await message.reply(help_text)
 
@@ -213,11 +232,19 @@ async def set_target_chat(client: Client, message: Message):
     try:
         # Try to get the chat to verify it exists
         chat = await client.get_chat(chat_id)
+        
+        # Verify bot has proper permissions
+        if chat.type == ChatType.CHANNEL:
+            member = await client.get_chat_member(chat.id, "me")
+            if not member.privileges or not member.privileges.can_post_messages:
+                return await message.reply("❌ Bot needs 'Post Messages' permission in the target channel")
+        
         Config.TARGET_CHAT_ID = chat.id
         await message.reply(
             f"✅ Target chat set to:\n"
             f"Title: {chat.title}\n"
-            f"Username: @{chat.username}\n"
+            f"Type: {chat.type}\n"
+            f"Username: @{chat.username if chat.username else 'N/A'}\n"
             f"ID: `{chat.id}`",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -294,6 +321,10 @@ async def handle_message(client: Client, message: Message):
 
         if Config.BATCH_MODE:
             if Config.START_ID is None:
+                # Verify access to source channel
+                if not await verify_chat_access(client, chat_id):
+                    return await message.reply("❌ Bot doesn't have proper access to the source channel. Make sure it's admin with post permissions.")
+                
                 Config.START_ID = msg_id
                 Config.CHAT_ID = chat_id
                 await message.reply(
@@ -357,6 +388,8 @@ async def process_batch(client: Client, message: Message):
                         processed += 1
                     else:
                         failed += 1
+                else:
+                    failed += 1
                 
                 # Update progress every 5 messages or at the end
                 now = asyncio.get_event_loop().time()
@@ -376,11 +409,16 @@ async def process_batch(client: Client, message: Message):
                 await asyncio.sleep(0.5)  # Reduced sleep time for better performance
             
             except FloodWait as e:
+                await progress_msg.edit(f"⏳ Flood wait: Sleeping for {e.value} seconds...")
                 await asyncio.sleep(e.value)
                 failed += 1
             except (MessageIdInvalid, ChannelInvalid):
                 failed += 1
                 await asyncio.sleep(1)
+            except ChatAdminRequired:
+                await progress_msg.edit("❌ Bot lost admin privileges during processing!")
+                Config.PROCESSING = False
+                break
             except RPCError as e:
                 print(f"RPCError processing {current_id}: {e}")
                 failed += 1
