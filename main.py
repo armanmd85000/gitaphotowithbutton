@@ -19,12 +19,8 @@ class Config:
     START_ID = None
     END_ID = None
     CURRENT_TASK = None
-    TARGET_CHAT_ID = None  # New: For /setchatid
-    REPLACEMENTS = {
-        "word": "replaceword",
-        "example": "sample",
-        "hello": "hi"
-    }
+    TARGET_CHAT_ID = None
+    REPLACEMENTS = {}  # Start with empty replacements
 
 app = Client(
     "advanced_batch_link_modifier",
@@ -40,10 +36,9 @@ def modify_content(text: str, offset: int) -> str:
     if not text:
         return text
 
-    # Apply word replacements in order (longer words first)
-    replacements = sorted(Config.REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True)
-    for original, replacement in replacements:
-        text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
+    # Apply word replacements (longest first to prevent partial matches)
+    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: -len(x[0])):
+        text = re.sub(rf'(?<!\w){re.escape(original)}(?!\w)', replacement, text, flags=re.IGNORECASE)
 
     # Modify Telegram links
     def replacer(match):
@@ -128,7 +123,7 @@ async def start_cmd(client: Client, message: Message):
 🔹 /addreplace WORD REPLACEMENT - Add word replacement
 🔹 /removereplace WORD - Remove word replacement
 🔹 /setchatid - Set target channel for processed messages
-🔹 /reset - Reset all settings
+🔹 /reset - COMPLETELY reset all settings
 🔹 /stop - Stop current processing
 
 **How to use batch mode:**
@@ -231,6 +226,7 @@ async def set_target_chat(client: Client, message: Message):
 
 @app.on_message(filters.command("reset"))
 async def reset_settings(client: Client, message: Message):
+    # Completely reset all settings
     Config.OFFSET = 0
     Config.PROCESSING = False
     Config.BATCH_MODE = False
@@ -238,11 +234,13 @@ async def reset_settings(client: Client, message: Message):
     Config.START_ID = None
     Config.END_ID = None
     Config.TARGET_CHAT_ID = None
+    Config.REPLACEMENTS = {}  # Clear all replacements
+    
     if Config.CURRENT_TASK:
         Config.CURRENT_TASK.cancel()
         Config.CURRENT_TASK = None
     
-    await message.reply("✅ All settings have been reset to defaults")
+    await message.reply("✅ All settings have been completely reset, including word replacements")
 
 @app.on_message(filters.command("batch"))
 async def start_batch(client: Client, message: Message):
