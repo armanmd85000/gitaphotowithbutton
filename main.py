@@ -1,6 +1,6 @@
 import re
 import asyncio
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode, MessageMediaType
@@ -19,6 +19,7 @@ class Config:
     START_ID = None
     END_ID = None
     CURRENT_TASK = None
+    TARGET_CHAT_ID = None  # New: For /setchatid
     REPLACEMENTS = {
         "word": "replaceword",
         "example": "sample",
@@ -39,8 +40,9 @@ def modify_content(text: str, offset: int) -> str:
     if not text:
         return text
 
-    # Apply word replacements
-    for original, replacement in Config.REPLACEMENTS.items():
+    # Apply word replacements in order (longer words first)
+    replacements = sorted(Config.REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True)
+    for original, replacement in replacements:
         text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
 
     # Modify Telegram links
@@ -124,6 +126,9 @@ async def start_cmd(client: Client, message: Message):
 🔹 /setoffset N - Set absolute offset value
 🔹 /replacewords - View current word replacements
 🔹 /addreplace WORD REPLACEMENT - Add word replacement
+🔹 /removereplace WORD - Remove word replacement
+🔹 /setchatid - Set target channel for processed messages
+🔹 /reset - Reset all settings
 🔹 /stop - Stop current processing
 
 **How to use batch mode:**
@@ -165,10 +170,10 @@ async def show_replacements(client: Client, message: Message):
     
     replacements_text = "\n".join(
         f"• `{original}` → `{replacement}`"
-        for original, replacement in Config.REPLACEMENTS.items()
+        for original, replacement in sorted(Config.REPLACEMENTS.items())
     )
     await message.reply(
-        f"🔤 Current Word Replacements:\n\n{replacements_text}",
+        f"🔤 Current Word Replacements ({len(Config.REPLACEMENTS)}):\n\n{replacements_text}",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -183,14 +188,69 @@ async def add_replacement(client: Client, message: Message):
     Config.REPLACEMENTS[original] = replacement
     await message.reply(
         f"✅ Added replacement:\n"
-        f"`{original}` → `{replacement}`",
+        f"`{original}` → `{replacement}`\n\n"
+        f"Total replacements now: {len(Config.REPLACEMENTS)}",
         parse_mode=ParseMode.MARKDOWN
     )
+
+@app.on_message(filters.command("removereplace"))
+async def remove_replacement(client: Client, message: Message):
+    if len(message.command) < 2:
+        return await message.reply("⚠️ Usage: /removereplace WORD")
+    
+    word = message.command[1].lower()
+    if word in Config.REPLACEMENTS:
+        del Config.REPLACEMENTS[word]
+        await message.reply(
+            f"✅ Removed replacement for `{word}`\n\n"
+            f"Total replacements now: {len(Config.REPLACEMENTS)}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await message.reply(f"⚠️ No replacement found for `{word}`")
+
+@app.on_message(filters.command("setchatid"))
+async def set_target_chat(client: Client, message: Message):
+    if len(message.command) < 2:
+        return await message.reply("⚠️ Usage: /setchatid @channelusername or -100123456789")
+    
+    chat_id = message.command[1]
+    try:
+        # Try to get the chat to verify it exists
+        chat = await client.get_chat(chat_id)
+        Config.TARGET_CHAT_ID = chat.id
+        await message.reply(
+            f"✅ Target chat set to:\n"
+            f"Title: {chat.title}\n"
+            f"Username: @{chat.username}\n"
+            f"ID: `{chat.id}`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        await message.reply(f"❌ Error setting chat ID: {str(e)}")
+
+@app.on_message(filters.command("reset"))
+async def reset_settings(client: Client, message: Message):
+    Config.OFFSET = 0
+    Config.PROCESSING = False
+    Config.BATCH_MODE = False
+    Config.CHAT_ID = None
+    Config.START_ID = None
+    Config.END_ID = None
+    Config.TARGET_CHAT_ID = None
+    if Config.CURRENT_TASK:
+        Config.CURRENT_TASK.cancel()
+        Config.CURRENT_TASK = None
+    
+    await message.reply("✅ All settings have been reset to defaults")
 
 @app.on_message(filters.command("batch"))
 async def start_batch(client: Client, message: Message):
     if Config.PROCESSING:
         return await message.reply("⚠️ Already processing, use /stop to cancel")
+    
+    if Config.TARGET_CHAT_ID is None:
+        return await message.reply("⚠️ Please set target chat first with /setchatid")
     
     Config.PROCESSING = True
     Config.BATCH_MODE = True
@@ -201,7 +261,8 @@ async def start_batch(client: Client, message: Message):
     await message.reply(
         f"🔹 Batch Mode Started\n"
         f"🔢 Current Offset: {Config.OFFSET}\n"
-        f"🔤 Word Replacements: {len(Config.REPLACEMENTS)}\n\n"
+        f"🔤 Word Replacements: {len(Config.REPLACEMENTS)}\n"
+        f"💬 Target Chat: `{Config.TARGET_CHAT_ID}`\n\n"
         f"Please REPLY to the FIRST message you want to process\n"
         f"or send its link (e.g. https://t.me/channel/123)"
     )
@@ -254,7 +315,8 @@ async def handle_message(client: Client, message: Message):
                 if not msg or msg.empty:
                     return await message.reply("❌ Couldn't fetch that message")
                 
-                await process_message(client, msg, message.chat.id)
+                target_chat = Config.TARGET_CHAT_ID or message.chat.id
+                await process_message(client, msg, target_chat)
             except (MessageIdInvalid, ChannelInvalid):
                 return await message.reply("❌ Invalid message or channel. Make sure the bot has access.")
             
@@ -269,13 +331,17 @@ async def process_batch(client: Client, message: Message):
         end_id = max(Config.START_ID, Config.END_ID)
         total = end_id - start_id + 1
         
+        target_chat = Config.TARGET_CHAT_ID or message.chat.id
+        
         progress_msg = await message.reply(
             f"⏳ Starting batch processing\n"
             f"Chat: {Config.CHAT_ID}\n"
             f"From ID: {start_id} to {end_id}\n"
             f"Total messages: {total}\n"
             f"Offset: {Config.OFFSET}\n"
-            f"Replacements: {len(Config.REPLACEMENTS)}"
+            f"Replacements: {len(Config.REPLACEMENTS)}\n"
+            f"Target Chat: `{target_chat}`",
+            parse_mode=ParseMode.MARKDOWN
         )
         
         processed = failed = 0
@@ -288,7 +354,7 @@ async def process_batch(client: Client, message: Message):
             try:
                 msg = await client.get_messages(Config.CHAT_ID, current_id)
                 if msg and not msg.empty:
-                    success = await process_message(client, msg, message.chat.id)
+                    success = await process_message(client, msg, target_chat)
                     if success:
                         processed += 1
                     else:
@@ -332,13 +398,14 @@ async def process_batch(client: Client, message: Message):
                 f"• Successfully processed: {processed}\n"
                 f"• Failed: {failed}\n"
                 f"• Offset Applied: {Config.OFFSET}\n"
-                f"• Word Replacements: {len(Config.REPLACEMENTS)}"
+                f"• Word Replacements: {len(Config.REPLACEMENTS)}\n"
+                f"• Target Chat: `{target_chat}`"
             )
             
             if failed > 0:
                 completion_text += "\n\n⚠️ Some messages failed. Check bot logs for details."
             
-            await progress_msg.edit(completion_text)
+            await progress_msg.edit(completion_text, parse_mode=ParseMode.MARKDOWN)
     
     except asyncio.CancelledError:
         await message.reply("🛑 Batch processing stopped by user")
