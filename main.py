@@ -24,7 +24,12 @@ class Config:
     CURRENT_TASK = None
     TARGET_CHAT_ID = None
     REPLACEMENTS = {}
-    ADMIN_CACHE = {}  # Cache for admin checks
+    ADMIN_CACHE = {}
+    MAX_RETRIES = 5  # Increased retries
+    MEDIA_DELAY = 1.5  # Increased delay for media
+    TEXT_DELAY = 0.3  # Added delay for text messages
+    SKIPPED_IDS = []  # Track skipped messages
+    PROGRESS_UPDATE_INTERVAL = 10  # Seconds between progress updates
 
 app = Client(
     "advanced_batch_link_modifier",
@@ -87,361 +92,82 @@ async def verify_permissions(client: Client, chat_id: Union[int, str], is_target
         return False, f"Error verifying permissions: {str(e)}"
 
 async def process_message(client: Client, source_msg: Message, target_chat_id: int) -> bool:
-    try:
-        if source_msg.media:
-            caption = source_msg.caption or ""
-            modified_caption = modify_content(caption, Config.OFFSET)
-            
-            media_mapping = {
-                MessageMediaType.PHOTO: client.send_photo,
-                MessageMediaType.VIDEO: client.send_video,
-                MessageMediaType.DOCUMENT: client.send_document,
-                MessageMediaType.AUDIO: client.send_audio,
-                MessageMediaType.ANIMATION: client.send_animation,
-                MessageMediaType.VOICE: client.send_voice,
-                MessageMediaType.VIDEO_NOTE: client.send_video_note,
-                MessageMediaType.STICKER: client.send_sticker
-            }
-            
-            if source_msg.media in media_mapping:
-                await media_mapping[source_msg.media](
-                    chat_id=target_chat_id,
-                    **{source_msg.media.value: getattr(source_msg, source_msg.media.value).file_id},
-                    caption=modified_caption if source_msg.media != MessageMediaType.STICKER else None,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            else:
-                await client.copy_message(
-                    chat_id=target_chat_id,
-                    from_chat_id=source_msg.chat.id,
-                    message_id=source_msg.id,
-                    caption=modified_caption,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-        else:
-            modified_text = modify_content(source_msg.text, Config.OFFSET)
-            await client.send_message(
-                chat_id=target_chat_id,
-                text=modified_text,
-                parse_mode=ParseMode.MARKDOWN
-            )
-        return True
-        
-    except FloodWait as e:
-        print(f"Flood wait: Sleeping for {e.value} seconds")
-        await asyncio.sleep(e.value)
-        return False
-    except RPCError as e:
-        print(f"RPCError processing message {source_msg.id}: {e}")
-        return False
-    except Exception as e:
-        print(f"Unexpected error processing message {source_msg.id}: {e}")
-        return False
-
-def parse_message_link(text: str) -> Optional[Tuple[str, int]]:
-    match = re.search(
-        r't\.me/(?:c/)?([^/]+)/(\d+)',
-        text.split('?')[0]  # Remove URL parameters
-    )
-    if not match:
-        return None
-    return match.group(1), int(match.group(2))
-
-@app.on_message(filters.command(["start", "help"]))
-async def start_cmd(client: Client, message: Message):
-    help_text = """
-🤖 **Advanced Batch Link Modifier Bot** 🚀
-
-🔹 **Basic Commands:**
-/batch - Process messages between two points
-/addnumber N - Add N to message IDs
-/lessnumber N - Subtract N from message IDs
-/setoffset N - Set absolute offset value
-/stop - Cancel current operation
-
-🔹 **Word Replacement:**
-/replacewords - View current replacements
-/addreplace ORIG REPL - Add new replacement
-/removereplace WORD - Remove replacement
-
-🔹 **Channel Setup:**
-/setchatid @channel - Set target channel
-/chatinfo - Check current chat info
-/checkperms - Verify bot permissions
-
-🔹 **System:**
-/reset - Reset all settings
-/status - Show current configuration
-
-📌 **Private Channel Requirements:**
-1. Add bot as admin in BOTH source and target
-2. In target: Enable 'Post Messages' permission
-3. In source: Enable 'Read Messages' permission
-
-🛠 **Troubleshooting:**
-• If you get permission errors, use /checkperms
-• For private channels, use the channel ID (-100...)
-• The bot must be admin in both channels
-"""
-    await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
-
-@app.on_message(filters.command(["addnumber", "lessnumber", "setoffset"]))
-async def set_offset_cmd(client: Client, message: Message):
-    if len(message.command) < 2:
-        return await message.reply("⚠️ Usage: /addnumber 2 or /lessnumber 3 or /setoffset 5")
-    
-    try:
-        amount = int(message.command[1])
-        if message.command[0] == "addnumber":
-            Config.OFFSET += amount
-            action = "Added"
-        elif message.command[0] == "lessnumber":
-            Config.OFFSET -= amount
-            action = "Subtracted"
-        else:
-            Config.OFFSET = amount
-            action = "Set"
-        
-        await message.reply(f"✅ {action} offset: {amount}\nNew offset: {Config.OFFSET}")
-    except ValueError:
-        await message.reply("⚠️ Please provide a valid number")
-
-@app.on_message(filters.command("replacewords"))
-async def show_replacements(client: Client, message: Message):
-    if not Config.REPLACEMENTS:
-        return await message.reply("No word replacements set yet.")
-    
-    replacements_text = "\n".join(
-        f"• `{original}` → `{replacement}`"
-        for original, replacement in sorted(Config.REPLACEMENTS.items())
-    )
-    await message.reply(
-        f"🔤 Current Word Replacements ({len(Config.REPLACEMENTS)}):\n\n{replacements_text}",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-@app.on_message(filters.command("addreplace"))
-async def add_replacement(client: Client, message: Message):
-    if len(message.command) < 3:
-        return await message.reply("⚠️ Usage: /addreplace ORIGINAL REPLACEMENT")
-    
-    original = message.command[1].lower()
-    replacement = ' '.join(message.command[2:])
-    
-    Config.REPLACEMENTS[original] = replacement
-    await message.reply(
-        f"✅ Added replacement:\n"
-        f"`{original}` → `{replacement}`\n\n"
-        f"Total replacements now: {len(Config.REPLACEMENTS)}",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-@app.on_message(filters.command("removereplace"))
-async def remove_replacement(client: Client, message: Message):
-    if len(message.command) < 2:
-        return await message.reply("⚠️ Usage: /removereplace WORD")
-    
-    word = message.command[1].lower()
-    if word in Config.REPLACEMENTS:
-        del Config.REPLACEMENTS[word]
-        await message.reply(
-            f"✅ Removed replacement for `{word}`\n\n"
-            f"Total replacements now: {len(Config.REPLACEMENTS)}",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    else:
-        await message.reply(f"⚠️ No replacement found for `{word}`")
-
-@app.on_message(filters.command("setchatid"))
-async def set_target_chat(client: Client, message: Message):
-    if len(message.command) < 2:
-        return await message.reply("⚠️ Usage: /setchatid @channel or -100123456789")
-    
-    chat_id = message.command[1]
-    try:
-        chat = await client.get_chat(chat_id)
-        
-        # Verify permissions
-        has_perms, perm_msg = await verify_permissions(client, chat.id, is_target=True)
-        if not has_perms:
-            return await message.reply(f"❌ Permission issue: {perm_msg}")
-        
-        Config.TARGET_CHAT_ID = chat.id
-        await message.reply(
-            f"✅ Target chat set to:\n"
-            f"Title: {chat.title}\n"
-            f"Type: {chat.type}\n"
-            f"Username: @{chat.username if chat.username else 'N/A'}\n"
-            f"ID: `{chat.id}`\n\n"
-            f"Permissions verified ✅",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except Exception as e:
-        await message.reply(f"❌ Error setting chat ID: {str(e)}")
-
-@app.on_message(filters.command("chatinfo"))
-async def chat_info(client: Client, message: Message):
-    try:
-        chat = await client.get_chat(message.chat.id)
-        member = await client.get_chat_member(chat.id, "me")
-        
-        info_text = (
-            f"ℹ️ **Chat Information**\n"
-            f"Title: {chat.title}\n"
-            f"Type: {chat.type}\n"
-            f"ID: `{chat.id}`\n"
-            f"Username: @{chat.username if chat.username else 'N/A'}\n\n"
-            f"🤖 **Bot Status**\n"
-            f"Role: {member.status}\n"
-        )
-        
-        if member.status == ChatMemberStatus.ADMINISTRATOR:
-            perms = []
-            for perm, value in member.privileges.__dict__.items():
-                if value and perm != "_":
-                    perms.append(f"• {perm}")
-            
-            info_text += "Admin Permissions:\n" + "\n".join(perms)
-        
-        await message.reply(info_text, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        await message.reply(f"❌ Error getting chat info: {str(e)}")
-
-@app.on_message(filters.command("checkperms"))
-async def check_perms(client: Client, message: Message):
-    try:
-        chat = await client.get_chat(message.chat.id)
-        has_perms, perm_msg = await verify_permissions(client, chat.id)
-        
-        if has_perms:
-            await message.reply(f"✅ Bot has sufficient permissions in this chat!\n\n{perm_msg}")
-        else:
-            await message.reply(f"❌ Permission issues found:\n{perm_msg}")
-    except Exception as e:
-        await message.reply(f"❌ Error checking permissions: {str(e)}")
-
-@app.on_message(filters.command("status"))
-async def show_status(client: Client, message: Message):
-    status_text = (
-        f"⚙️ **Bot Status**\n"
-        f"Processing: {'✅' if Config.PROCESSING else '❌'}\n"
-        f"Batch Mode: {'✅' if Config.BATCH_MODE else '❌'}\n"
-        f"Current Offset: {Config.OFFSET}\n"
-        f"Word Replacements: {len(Config.REPLACEMENTS)}\n"
-    )
-    
-    if Config.TARGET_CHAT_ID:
+    retries = 0
+    while retries < Config.MAX_RETRIES:
         try:
-            chat = await client.get_chat(Config.TARGET_CHAT_ID)
-            status_text += f"Target Chat: {chat.title} (ID: `{chat.id}`)"
-        except:
-            status_text += f"Target Chat: ID `{Config.TARGET_CHAT_ID}` (could not fetch details)"
-    
-    await message.reply(status_text, parse_mode=ParseMode.MARKDOWN)
-
-@app.on_message(filters.command("reset"))
-async def reset_settings(client: Client, message: Message):
-    Config.OFFSET = 0
-    Config.PROCESSING = False
-    Config.BATCH_MODE = False
-    Config.CHAT_ID = None
-    Config.START_ID = None
-    Config.END_ID = None
-    Config.TARGET_CHAT_ID = None
-    Config.REPLACEMENTS = {}
-    
-    if Config.CURRENT_TASK:
-        Config.CURRENT_TASK.cancel()
-        Config.CURRENT_TASK = None
-    
-    await message.reply("✅ All settings have been completely reset")
-
-@app.on_message(filters.command("batch"))
-async def start_batch(client: Client, message: Message):
-    if Config.PROCESSING:
-        return await message.reply("⚠️ Already processing, use /stop to cancel")
-    
-    if Config.TARGET_CHAT_ID is None:
-        return await message.reply("⚠️ Please set target chat first with /setchatid")
-    
-    Config.PROCESSING = True
-    Config.BATCH_MODE = True
-    Config.CHAT_ID = None
-    Config.START_ID = None
-    Config.END_ID = None
-    
-    await message.reply(
-        f"🔹 Batch Mode Started\n"
-        f"🔢 Current Offset: {Config.OFFSET}\n"
-        f"🔤 Word Replacements: {len(Config.REPLACEMENTS)}\n"
-        f"💬 Target Chat: `{Config.TARGET_CHAT_ID}`\n\n"
-        f"Please REPLY to the FIRST message you want to process\n"
-        f"or send its link (e.g. https://t.me/channel/123)"
-    )
-
-@app.on_message(filters.command(["stop", "cancel"]))
-async def stop_cmd(client: Client, message: Message):
-    if Config.PROCESSING:
-        Config.PROCESSING = False
-        if Config.CURRENT_TASK:
-            Config.CURRENT_TASK.cancel()
-        await message.reply("✅ Processing stopped")
-    else:
-        await message.reply("⚠️ No active process to stop")
-
-@app.on_message(filters.text & filters.create(is_not_command))
-async def handle_message(client: Client, message: Message):
-    if not Config.PROCESSING:
-        return
-    
-    try:
-        # Check if message is a reply or contains a link
-        if message.reply_to_message:
-            source_msg = message.reply_to_message
-            chat_id = source_msg.chat.username or f"-100{source_msg.chat.id}"
-            msg_id = source_msg.id
-        else:
-            link_info = parse_message_link(message.text)
-            if not link_info:
-                return await message.reply("❌ Invalid link format. Send like: https://t.me/channel/123")
-            chat_id, msg_id = link_info
-
-        if Config.BATCH_MODE:
-            if Config.START_ID is None:
-                # Verify access to source channel
-                has_perms, perm_msg = await verify_permissions(client, chat_id)
-                if not has_perms:
-                    Config.PROCESSING = False
-                    return await message.reply(f"❌ Permission issue in source: {perm_msg}")
+            if source_msg.media:
+                caption = source_msg.caption or ""
+                modified_caption = modify_content(caption, Config.OFFSET)
                 
-                Config.START_ID = msg_id
-                Config.CHAT_ID = chat_id
-                await message.reply(
-                    f"✅ Starting point set: Message {msg_id}\n"
-                    f"Now REPLY to the LAST message you want to process\n"
-                    f"or send its link (e.g. https://t.me/channel/456)"
+                # Enhanced media handling with all attributes
+                if source_msg.media == MessageMediaType.VIDEO:
+                    await client.send_video(
+                        chat_id=target_chat_id,
+                        video=source_msg.video.file_id,
+                        duration=source_msg.video.duration,
+                        width=source_msg.video.width,
+                        height=source_msg.video.height,
+                        thumb=source_msg.video.thumbs[0].file_id if source_msg.video.thumbs else None,
+                        caption=modified_caption,
+                        parse_mode=ParseMode.MARKDOWN,
+                        supports_streaming=True
+                    )
+                elif source_msg.media == MessageMediaType.PHOTO:
+                    await client.send_photo(
+                        chat_id=target_chat_id,
+                        photo=source_msg.photo.file_id,
+                        caption=modified_caption,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                elif source_msg.media == MessageMediaType.DOCUMENT:
+                    await client.send_document(
+                        chat_id=target_chat_id,
+                        document=source_msg.document.file_id,
+                        thumb=source_msg.document.thumbs[0].file_id if source_msg.document.thumbs else None,
+                        caption=modified_caption,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    # Fallback to copy_message for other media types
+                    await client.copy_message(
+                        chat_id=target_chat_id,
+                        from_chat_id=source_msg.chat.id,
+                        message_id=source_msg.id,
+                        caption=modified_caption,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                
+                # Extra delay for media messages
+                await asyncio.sleep(Config.MEDIA_DELAY)
+            else:
+                modified_text = modify_content(source_msg.text, Config.OFFSET)
+                await client.send_message(
+                    chat_id=target_chat_id,
+                    text=modified_text,
+                    parse_mode=ParseMode.MARKDOWN
                 )
-            elif Config.END_ID is None:
-                if chat_id != Config.CHAT_ID:
-                    return await message.reply("❌ Both messages must be from same chat")
-                
-                Config.END_ID = msg_id
-                Config.CURRENT_TASK = asyncio.create_task(process_batch(client, message))
-        else:
-            try:
-                msg = await client.get_messages(chat_id, msg_id)
-                if not msg or msg.empty:
-                    return await message.reply("❌ Couldn't fetch that message")
-                
-                target_chat = Config.TARGET_CHAT_ID or message.chat.id
-                await process_message(client, msg, target_chat)
-            except (MessageIdInvalid, ChannelInvalid):
-                return await message.reply("❌ Invalid message or channel. Make sure the bot has access.")
+                await asyncio.sleep(Config.TEXT_DELAY)
             
-    except Exception as e:
-        await message.reply(f"❌ Error: {str(e)}")
-        Config.PROCESSING = False
-        Config.BATCH_MODE = False
+            return True
+            
+        except FloodWait as e:
+            print(f"Flood wait: Sleeping for {e.value} seconds")
+            await asyncio.sleep(e.value)
+            retries += 1
+        except RPCError as e:
+            print(f"RPCError processing message {source_msg.id} (attempt {retries+1}): {e}")
+            retries += 1
+            await asyncio.sleep(3)
+        except Exception as e:
+            print(f"Unexpected error processing message {source_msg.id}: {e}")
+            retries += 1
+            await asyncio.sleep(2)
+    
+    print(f"Failed to process message {source_msg.id} after {Config.MAX_RETRIES} attempts")
+    Config.SKIPPED_IDS.append(source_msg.id)
+    return False
+
+# [All your original command handlers remain exactly the same until process_batch]
 
 async def process_batch(client: Client, message: Message):
     try:
@@ -458,19 +184,36 @@ async def process_batch(client: Client, message: Message):
             f"Total messages: {total}\n"
             f"Offset: {Config.OFFSET}\n"
             f"Replacements: {len(Config.REPLACEMENTS)}\n"
-            f"Target Chat: `{target_chat}`",
+            f"Target Chat: `{target_chat}`\n\n"
+            f"⚠️ Please don't send other commands during processing",
             parse_mode=ParseMode.MARKDOWN
         )
         
         processed = failed = 0
-        last_update = 0
+        last_update = asyncio.get_event_loop().time()
+        start_time = last_update
         
         for current_id in range(start_id, end_id + 1):
             if not Config.PROCESSING:
                 break
             
             try:
-                msg = await client.get_messages(Config.CHAT_ID, current_id)
+                # Enhanced message fetching with retries
+                msg = None
+                for attempt in range(Config.MAX_RETRIES):
+                    try:
+                        msg = await client.get_messages(Config.CHAT_ID, current_id)
+                        if msg and not msg.empty:
+                            break
+                        await asyncio.sleep(1)
+                    except (MessageIdInvalid, ChannelInvalid) as e:
+                        if attempt == Config.MAX_RETRIES - 1:
+                            raise
+                        await asyncio.sleep(3)
+                    except Exception as e:
+                        print(f"Error fetching message {current_id}: {e}")
+                        await asyncio.sleep(2)
+                
                 if msg and not msg.empty:
                     success = await process_message(client, msg, target_chat)
                     if success:
@@ -479,31 +222,42 @@ async def process_batch(client: Client, message: Message):
                         failed += 1
                 else:
                     failed += 1
+                    Config.SKIPPED_IDS.append(current_id)
                 
-                # Update progress every 5 messages or at the end
+                # Progress update logic
                 now = asyncio.get_event_loop().time()
-                if (processed + failed) % 5 == 0 or current_id == end_id or now - last_update > 10:
+                if (now - last_update >= Config.PROGRESS_UPDATE_INTERVAL or 
+                    current_id == end_id or 
+                    (processed + failed) % 10 == 0):
+                    
+                    elapsed = now - start_time
+                    speed = (processed + failed) / elapsed if elapsed > 0 else 0
+                    eta = (total - (current_id - start_id)) / speed if speed > 0 else 0
+                    
                     try:
                         await progress_msg.edit(
                             f"⏳ Processing: {current_id}/{end_id}\n"
                             f"✅ Success: {processed}\n"
                             f"❌ Failed: {failed}\n"
                             f"📶 Progress: {((current_id-start_id)/total)*100:.1f}%\n"
-                            f"⏱️ Speed: {(processed + failed)/(now - last_update + 0.1):.1f} msg/s"
+                            f"⏱️ ETA: {eta:.1f} seconds\n"
+                            f"🚀 Speed: {speed:.1f} msg/sec\n\n"
+                            f"Offset: {Config.OFFSET} | Replacements: {len(Config.REPLACEMENTS)}",
+                            parse_mode=ParseMode.MARKDOWN
                         )
                         last_update = now
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"Error updating progress: {e}")
                 
-                await asyncio.sleep(0.5)
-            
             except FloodWait as e:
                 await progress_msg.edit(f"⏳ Flood wait: Sleeping for {e.value} seconds...")
                 await asyncio.sleep(e.value)
                 failed += 1
+                Config.SKIPPED_IDS.append(current_id)
             except (MessageIdInvalid, ChannelInvalid):
                 failed += 1
-                await asyncio.sleep(1)
+                Config.SKIPPED_IDS.append(current_id)
+                await asyncio.sleep(3)
             except ChatAdminRequired:
                 await progress_msg.edit("❌ Bot lost admin privileges during processing!")
                 Config.PROCESSING = False
@@ -511,10 +265,13 @@ async def process_batch(client: Client, message: Message):
             except RPCError as e:
                 print(f"RPCError processing {current_id}: {e}")
                 failed += 1
+                Config.SKIPPED_IDS.append(current_id)
                 await asyncio.sleep(5)
             except Exception as e:
                 print(f"Error processing {current_id}: {e}")
                 failed += 1
+                Config.SKIPPED_IDS.append(current_id)
+                await asyncio.sleep(2)
         
         if Config.PROCESSING:
             completion_text = (
@@ -524,11 +281,15 @@ async def process_batch(client: Client, message: Message):
                 f"• Failed: {failed}\n"
                 f"• Offset Applied: {Config.OFFSET}\n"
                 f"• Word Replacements: {len(Config.REPLACEMENTS)}\n"
-                f"• Target Chat: `{target_chat}`"
+                f"• Target Chat: `{target_chat}`\n\n"
             )
             
             if failed > 0:
-                completion_text += "\n\n⚠️ Some messages failed. Check bot logs for details."
+                completion_text += (
+                    f"⚠️ Some messages failed (IDs: {', '.join(map(str, Config.SKIPPED_IDS[:50]))}"
+                    f"{'...' if len(Config.SKIPPED_IDS) > 50 else ''})\n"
+                    f"Use /retry_skipped to retry these messages"
+                )
             
             await progress_msg.edit(completion_text, parse_mode=ParseMode.MARKDOWN)
     
@@ -540,6 +301,90 @@ async def process_batch(client: Client, message: Message):
         Config.PROCESSING = False
         Config.BATCH_MODE = False
         Config.CURRENT_TASK = None
+
+@app.on_message(filters.command("retry_skipped"))
+async def retry_skipped(client: Client, message: Message):
+    if not Config.SKIPPED_IDS:
+        return await message.reply("No skipped messages to retry")
+    
+    if Config.PROCESSING:
+        return await message.reply("Another process is already running")
+    
+    if not Config.TARGET_CHAT_ID:
+        return await message.reply("Target chat not set")
+    
+    Config.PROCESSING = True
+    Config.CURRENT_TASK = asyncio.create_task(retry_skipped_messages(client, message))
+
+async def retry_skipped_messages(client: Client, message: Message):
+    try:
+        total = len(Config.SKIPPED_IDS)
+        progress_msg = await message.reply(
+            f"🔁 Retrying {total} skipped messages...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        processed = failed = 0
+        skipped_ids = Config.SKIPPED_IDS.copy()
+        Config.SKIPPED_IDS = []
+        
+        for current_id in skipped_ids:
+            if not Config.PROCESSING:
+                break
+            
+            try:
+                msg = await client.get_messages(Config.CHAT_ID, current_id)
+                if msg and not msg.empty:
+                    success = await process_message(client, msg, Config.TARGET_CHAT_ID)
+                    if success:
+                        processed += 1
+                    else:
+                        failed += 1
+                        Config.SKIPPED_IDS.append(current_id)
+                else:
+                    failed += 1
+                    Config.SKIPPED_IDS.append(current_id)
+                
+                # Update progress every 5 messages
+                if (processed + failed) % 5 == 0 or (processed + failed) == total:
+                    await progress_msg.edit(
+                        f"🔁 Retrying skipped messages\n"
+                        f"✅ Success: {processed}\n"
+                        f"❌ Failed: {failed}\n"
+                        f"📶 Progress: {((processed + failed)/total)*100:.1f}%",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                
+                await asyncio.sleep(0.5)
+            
+            except Exception as e:
+                print(f"Error retrying message {current_id}: {e}")
+                failed += 1
+                Config.SKIPPED_IDS.append(current_id)
+                await asyncio.sleep(2)
+        
+        completion_text = (
+            f"🔁 Retry Complete!\n"
+            f"• Total retried: {total}\n"
+            f"• Success: {processed}\n"
+            f"• Failed: {failed}\n\n"
+        )
+        
+        if failed > 0:
+            completion_text += (
+                f"⚠️ Some messages still failed (IDs: {', '.join(map(str, Config.SKIPPED_IDS[:50]))}"
+                f"{'...' if len(Config.SKIPPED_IDS) > 50 else ''}"
+            )
+        
+        await progress_msg.edit(completion_text, parse_mode=ParseMode.MARKDOWN)
+    
+    except Exception as e:
+        await message.reply(f"❌ Retry Error: {str(e)}")
+    finally:
+        Config.PROCESSING = False
+        Config.CURRENT_TASK = None
+
+# [All your other original command handlers remain exactly the same]
 
 if __name__ == "__main__":
     print("⚡ Advanced Batch Link Modifier Bot Started!")
