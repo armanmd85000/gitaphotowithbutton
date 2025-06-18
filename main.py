@@ -1,12 +1,12 @@
 import re
 import asyncio
-from typing import Optional, Tuple, Dict, Union
+from typing import Optional, Tuple, Dict, Union, List
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode, MessageMediaType, ChatType, ChatMemberStatus
 from pyrogram.errors import (
     FloodWait, RPCError, MessageIdInvalid, ChannelInvalid,
-    ChatAdminRequired, PeerIdInvalid, UserNotParticipant
+    ChatAdminRequired, PeerIdInvalid, UserNotParticipant, BadRequest
 )
 
 # Bot Configuration
@@ -24,7 +24,14 @@ class Config:
     CURRENT_TASK = None
     TARGET_CHAT_ID = None
     REPLACEMENTS = {}
-    ADMIN_CACHE = {}  # Cache for admin checks
+    ADMIN_CACHE = {}
+    MESSAGE_FILTERS = {
+        'text': True,
+        'photo': True,
+        'video': True,
+        'document': True,
+        'audio': True
+    }
 
 app = Client(
     "advanced_batch_link_modifier",
@@ -40,46 +47,72 @@ def modify_content(text: str, offset: int) -> str:
     if not text:
         return text
 
-    # Apply word replacements (longest first)
-    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: -len(x[0])):
-        text = re.sub(rf'(?<!\w){re.escape(original)}(?!\w)', replacement, text, flags=re.IGNORECASE)
+    # Apply word replacements (case-insensitive with word boundaries)
+    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower()):
+        text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
 
     # Modify Telegram links
     def replacer(match):
-        full_url = match.group(0)
-        msg_id = int(match.group(2))
-        return full_url.replace(f"/{msg_id}", f"/{msg_id + offset}")
+        prefix = match.group(1) or ""
+        domain = match.group(2)
+        chat_part = match.group(3)
+        msg_id = int(match.group(4))
+        return f"{prefix}://{domain}/{chat_part}/{msg_id + offset}"
 
-    pattern = r'https?://(?:t\.me|telegram\.(?:me|dog))/(?:c/)?([^/]+)/(\d+)'
+    pattern = r'(https?://)?(t\.me|telegram\.(?:me|dog))/(c/)?([^/]+)/(\d+)'
     return re.sub(pattern, replacer, text)
 
 async def verify_permissions(client: Client, chat_id: Union[int, str], is_target=False) -> Tuple[bool, str]:
     try:
+        if chat_id in Config.ADMIN_CACHE:
+            return Config.ADMIN_CACHE[chat_id]
+
         chat = await client.get_chat(chat_id)
         
-        # Check if it's a channel or supergroup
+        # Check if it's a supported chat type
         if chat.type not in [ChatType.CHANNEL, ChatType.SUPERGROUP, ChatType.GROUP]:
-            return False, "This chat type is not supported"
+            result = (False, "This chat type is not supported")
+            Config.ADMIN_CACHE[chat_id] = result
+            return result
             
         # Get bot's member status
         try:
             member = await client.get_chat_member(chat.id, "me")
         except UserNotParticipant:
-            return False, "Bot is not a member of this chat"
+            result = (False, "Bot is not a member of this chat")
+            Config.ADMIN_CACHE[chat_id] = result
+            return result
             
-        # Check admin status and permissions
+        # Check required permissions
+        required_perms = []
+        if is_target:
+            required_perms.append("can_post_messages" if chat.type == ChatType.CHANNEL else "can_send_messages")
+        
         if chat.type == ChatType.CHANNEL:
             if member.status != ChatMemberStatus.ADMINISTRATOR:
-                return False, "Bot needs to be admin in the channel"
-            if is_target and not member.privileges.can_post_messages:
-                return False, "Bot needs 'Post Messages' permission in target channel"
-        else:  # Groups and supergroups
+                result = (False, "Bot needs to be admin in the channel")
+                Config.ADMIN_CACHE[chat_id] = result
+                return result
+        else:
             if member.status != ChatMemberStatus.ADMINISTRATOR:
-                return False, "Bot needs to be admin in the group"
-            if is_target and not member.privileges.can_send_messages:
-                return False, "Bot needs 'Send Messages' permission in target chat"
-                
-        return True, "OK"
+                result = (False, "Bot needs to be admin in the group")
+                Config.ADMIN_CACHE[chat_id] = result
+                return result
+        
+        # Check specific permissions
+        if required_perms and member.privileges:
+            missing_perms = [
+                perm for perm in required_perms 
+                if not getattr(member.privileges, perm, False)
+            ]
+            if missing_perms:
+                result = (False, f"Bot missing permissions: {', '.join(missing_perms)}")
+                Config.ADMIN_CACHE[chat_id] = result
+                return result
+        
+        result = (True, "OK")
+        Config.ADMIN_CACHE[chat_id] = result
+        return result
         
     except (ChannelInvalid, PeerIdInvalid):
         return False, "Invalid chat ID or bot not in chat"
@@ -88,7 +121,11 @@ async def verify_permissions(client: Client, chat_id: Union[int, str], is_target
 
 async def process_message(client: Client, source_msg: Message, target_chat_id: int) -> bool:
     try:
-        if source_msg.media:
+        # Skip unsupported message types
+        if source_msg.service or source_msg.empty:
+            return False
+            
+        if source_msg.media and Config.MESSAGE_FILTERS.get(source_msg.media.value, True):
             caption = source_msg.caption or ""
             modified_caption = modify_content(caption, Config.OFFSET)
             
@@ -110,7 +147,10 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
                     caption=modified_caption if source_msg.media != MessageMediaType.STICKER else None,
                     parse_mode=ParseMode.MARKDOWN
                 )
+                return True
             else:
+                # Fallback for unsupported media types
+                modified_caption = modify_content(source_msg.caption or "", Config.OFFSET)
                 await client.copy_message(
                     chat_id=target_chat_id,
                     from_chat_id=source_msg.chat.id,
@@ -118,14 +158,18 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
                     caption=modified_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
-        else:
+                return True
+        elif source_msg.text and Config.MESSAGE_FILTERS['text']:
             modified_text = modify_content(source_msg.text, Config.OFFSET)
             await client.send_message(
                 chat_id=target_chat_id,
                 text=modified_text,
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=source_msg.reply_markup  # Preserve reply markup if any
             )
-        return True
+            return True
+            
+        return False
         
     except FloodWait as e:
         print(f"Flood wait: Sleeping for {e.value} seconds")
@@ -139,13 +183,17 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
         return False
 
 def parse_message_link(text: str) -> Optional[Tuple[str, int]]:
-    match = re.search(
+    patterns = [
         r't\.me/(?:c/)?([^/]+)/(\d+)',
-        text.split('?')[0]  # Remove URL parameters
-    )
-    if not match:
-        return None
-    return match.group(1), int(match.group(2))
+        r't\.me/joinchat/([^/]+)',
+        r't\.me/\+([^/]+)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text.split('?')[0])
+        if match:
+            return match.group(1), int(match.group(2)) if len(match.groups()) > 1 else None
+    return None
 
 @app.on_message(filters.command(["start", "help"]))
 async def start_cmd(client: Client, message: Message):
@@ -169,19 +217,24 @@ async def start_cmd(client: Client, message: Message):
 /chatinfo - Check current chat info
 /checkperms - Verify bot permissions
 
+🔹 **Message Filters:**
+/filtertypes - Show current filters
+/enablefilter TYPE - Enable message type
+/disablefilter TYPE - Disable message type
+
 🔹 **System:**
 /reset - Reset all settings
 /status - Show current configuration
 
-📌 **Private Channel Requirements:**
+📌 **Requirements:**
 1. Add bot as admin in BOTH source and target
 2. In target: Enable 'Post Messages' permission
 3. In source: Enable 'Read Messages' permission
 
-🛠 **Troubleshooting:**
-• If you get permission errors, use /checkperms
+🛠 **Usage Tips:**
 • For private channels, use the channel ID (-100...)
 • The bot must be admin in both channels
+• Use /batch in the source chat for best results
 """
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -279,6 +332,35 @@ async def set_target_chat(client: Client, message: Message):
     except Exception as e:
         await message.reply(f"❌ Error setting chat ID: {str(e)}")
 
+@app.on_message(filters.command(["filtertypes", "filters"]))
+async def show_filters(client: Client, message: Message):
+    filters_text = "\n".join(
+        f"• {type_.upper()}: {'✅' if enabled else '❌'}"
+        for type_, enabled in Config.MESSAGE_FILTERS.items()
+    )
+    await message.reply(
+        f"🔍 Current Message Filters:\n\n{filters_text}\n\n"
+        f"Use /enablefilter or /disablefilter to change",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+@app.on_message(filters.command(["enablefilter", "disablefilter"]))
+async def toggle_filter(client: Client, message: Message):
+    if len(message.command) < 2:
+        return await message.reply("⚠️ Usage: /enablefilter text OR /disablefilter photo")
+    
+    filter_type = message.command[1].lower()
+    if filter_type not in Config.MESSAGE_FILTERS:
+        return await message.reply(f"⚠️ Invalid filter type. Available: {', '.join(Config.MESSAGE_FILTERS.keys())}")
+    
+    is_enable = message.command[0] == "enablefilter"
+    Config.MESSAGE_FILTERS[filter_type] = is_enable
+    
+    await message.reply(
+        f"✅ {'Enabled' if is_enable else 'Disabled'} filter for: {filter_type.upper()}\n\n"
+        f"Current status: {'✅' if Config.MESSAGE_FILTERS[filter_type] else '❌'}"
+    )
+
 @app.on_message(filters.command("chatinfo"))
 async def chat_info(client: Client, message: Message):
     try:
@@ -328,6 +410,7 @@ async def show_status(client: Client, message: Message):
         f"Batch Mode: {'✅' if Config.BATCH_MODE else '❌'}\n"
         f"Current Offset: {Config.OFFSET}\n"
         f"Word Replacements: {len(Config.REPLACEMENTS)}\n"
+        f"Active Filters: {sum(Config.MESSAGE_FILTERS.values())}/{len(Config.MESSAGE_FILTERS)}\n"
     )
     
     if Config.TARGET_CHAT_ID:
@@ -349,6 +432,13 @@ async def reset_settings(client: Client, message: Message):
     Config.END_ID = None
     Config.TARGET_CHAT_ID = None
     Config.REPLACEMENTS = {}
+    Config.MESSAGE_FILTERS = {
+        'text': True,
+        'photo': True,
+        'video': True,
+        'document': True,
+        'audio': True
+    }
     
     if Config.CURRENT_TASK:
         Config.CURRENT_TASK.cancel()
@@ -434,9 +524,13 @@ async def handle_message(client: Client, message: Message):
                     return await message.reply("❌ Couldn't fetch that message")
                 
                 target_chat = Config.TARGET_CHAT_ID or message.chat.id
-                await process_message(client, msg, target_chat)
+                success = await process_message(client, msg, target_chat)
+                if not success:
+                    await message.reply("⚠️ Failed to process this message")
             except (MessageIdInvalid, ChannelInvalid):
                 return await message.reply("❌ Invalid message or channel. Make sure the bot has access.")
+            except Exception as e:
+                return await message.reply(f"❌ Error processing message: {str(e)}")
             
     except Exception as e:
         await message.reply(f"❌ Error: {str(e)}")
@@ -463,7 +557,8 @@ async def process_batch(client: Client, message: Message):
         )
         
         processed = failed = 0
-        last_update = 0
+        last_update = asyncio.get_event_loop().time()
+        last_progress = 0
         
         for current_id in range(start_id, end_id + 1):
             if not Config.PROCESSING:
@@ -480,22 +575,28 @@ async def process_batch(client: Client, message: Message):
                 else:
                     failed += 1
                 
-                # Update progress every 5 messages or at the end
+                # Update progress every 5 messages or every 10 seconds
                 now = asyncio.get_event_loop().time()
-                if (processed + failed) % 5 == 0 or current_id == end_id or now - last_update > 10:
+                if (processed + failed) % 5 == 0 or now - last_update >= 10 or current_id == end_id:
+                    progress = ((current_id - start_id) / total) * 100
+                    speed = (processed + failed) / (now - last_progress + 0.1)
+                    
                     try:
                         await progress_msg.edit(
                             f"⏳ Processing: {current_id}/{end_id}\n"
                             f"✅ Success: {processed}\n"
                             f"❌ Failed: {failed}\n"
-                            f"📶 Progress: {((current_id-start_id)/total)*100:.1f}%\n"
-                            f"⏱️ Speed: {(processed + failed)/(now - last_update + 0.1):.1f} msg/s"
+                            f"📶 Progress: {progress:.1f}%\n"
+                            f"⏱️ Speed: {speed:.1f} msg/s"
                         )
                         last_update = now
-                    except:
-                        pass
+                        if (processed + failed) % 50 == 0:
+                            last_progress = now
+                    except Exception as e:
+                        print(f"Error updating progress: {e}")
                 
-                await asyncio.sleep(0.5)
+                # Small delay to prevent flooding
+                await asyncio.sleep(0.3)
             
             except FloodWait as e:
                 await progress_msg.edit(f"⏳ Flood wait: Sleeping for {e.value} seconds...")
@@ -515,6 +616,7 @@ async def process_batch(client: Client, message: Message):
             except Exception as e:
                 print(f"Error processing {current_id}: {e}")
                 failed += 1
+                await asyncio.sleep(1)
         
         if Config.PROCESSING:
             completion_text = (
@@ -522,6 +624,7 @@ async def process_batch(client: Client, message: Message):
                 f"• Total messages: {total}\n"
                 f"• Successfully processed: {processed}\n"
                 f"• Failed: {failed}\n"
+                f"• Success rate: {(processed/total)*100:.1f}%\n"
                 f"• Offset Applied: {Config.OFFSET}\n"
                 f"• Word Replacements: {len(Config.REPLACEMENTS)}\n"
                 f"• Target Chat: `{target_chat}`"
@@ -548,5 +651,7 @@ if __name__ == "__main__":
         idle()
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        print(f"Fatal error: {e}")
     finally:
         app.stop()
