@@ -1,7 +1,7 @@
 import re
 import asyncio
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message
 from pyrogram.enums import ParseMode, ChatType, ChatMemberStatus
 from pyrogram.errors import FloodWait, RPCError
 
@@ -22,10 +22,6 @@ app = Client(
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
 )
-
-# ======================
-# CORE FUNCTIONALITY
-# ======================
 
 def modify_content(text: str) -> str:
     """Modify Telegram links in text with current offset"""
@@ -66,13 +62,8 @@ async def verify_admin(client: Client, chat_id: int) -> bool:
     except Exception:
         return False
 
-# ======================
-# COMMAND HANDLERS
-# ======================
-
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, message: Message):
-    """Start command with bot information"""
     help_text = """
 🤖 **Advanced Link Modifier Bot** 🚀
 
@@ -91,13 +82,12 @@ Word Replacements: `{replacements}`
 """.format(
     offset=Config.OFFSET,
     target_chat=Config.TARGET_CHAT_ID or "Not set",
-    replacements=len(Config.REPLACEMENTS)
+    replacements=len(Config.REPLACEMENTS))
     
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
 
 @app.on_message(filters.command(["addnumber", "lessnumber"]))
 async def offset_cmd(client: Client, message: Message):
-    """Handle addnumber/lessnumber commands"""
     if len(message.command) < 2:
         return await message.reply("⚠️ Usage: /addnumber 2 or /lessnumber 3")
     
@@ -117,14 +107,12 @@ async def offset_cmd(client: Client, message: Message):
 
 @app.on_message(filters.command("remowords"))
 async def remowords_cmd(client: Client, message: Message):
-    """Remove all word replacements"""
     count = len(Config.REPLACEMENTS)
     Config.REPLACEMENTS = {}
     await message.reply(f"✅ Removed all {count} word replacements")
 
 @app.on_message(filters.command("setchatid"))
 async def setchatid_cmd(client: Client, message: Message):
-    """Set target chat ID"""
     if len(message.command) < 2:
         return await message.reply("⚠️ Usage: /setchatid @channel or -100123456789")
     
@@ -132,13 +120,12 @@ async def setchatid_cmd(client: Client, message: Message):
     try:
         chat = await client.get_chat(chat_id)
         
-        # Verify bot admin status
         is_admin = await verify_admin(client, chat.id)
         if not is_admin:
             return await message.reply("❌ Bot must be admin in target chat")
         
         Config.TARGET_CHAT_ID = chat.id
-        Config.ADMIN_CACHE.clear()  # Clear cache
+        Config.ADMIN_CACHE.clear()
         
         await message.reply(
             f"✅ Target chat set to:\n"
@@ -150,18 +137,12 @@ async def setchatid_cmd(client: Client, message: Message):
     except Exception as e:
         await message.reply(f"❌ Error: {str(e)}")
 
-# ======================
-# MESSAGE HANDLING
-# ======================
-
 @app.on_message(filters.text & ~filters.command)
 async def handle_text_messages(client: Client, message: Message):
-    """Process all text messages containing Telegram links"""
     if not Config.TARGET_CHAT_ID:
         return
     
     try:
-        # Check if we're admin in source chat
         if not await verify_admin(client, message.chat.id):
             return
         
@@ -177,10 +158,6 @@ async def handle_text_messages(client: Client, message: Message):
         await asyncio.sleep(e.value)
     except RPCError as e:
         print(f"Error processing message: {e}")
-
-# ======================
-# BOT STARTUP
-# ======================
 
 if __name__ == "__main__":
     print("⚡ Advanced Link Modifier Bot Started!")
