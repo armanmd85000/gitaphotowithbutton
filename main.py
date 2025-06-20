@@ -48,7 +48,7 @@ def modify_content(text: str, offset: int) -> str:
         return text
 
     # Apply word replacements (case-insensitive with word boundaries)
-    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower()):
+    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower())):
         text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
 
     # Modify Telegram links
@@ -69,13 +69,11 @@ async def verify_permissions(client: Client, chat_id: Union[int, str], is_target
 
         chat = await client.get_chat(chat_id)
         
-        # Check if it's a supported chat type
         if chat.type not in [ChatType.CHANNEL, ChatType.SUPERGROUP, ChatType.GROUP]:
             result = (False, "This chat type is not supported")
             Config.ADMIN_CACHE[chat_id] = result
             return result
             
-        # Get bot's member status
         try:
             member = await client.get_chat_member(chat.id, "me")
         except UserNotParticipant:
@@ -83,7 +81,6 @@ async def verify_permissions(client: Client, chat_id: Union[int, str], is_target
             Config.ADMIN_CACHE[chat_id] = result
             return result
             
-        # Check required permissions
         required_perms = []
         if is_target:
             required_perms.append("can_post_messages" if chat.type == ChatType.CHANNEL else "can_send_messages")
@@ -99,7 +96,6 @@ async def verify_permissions(client: Client, chat_id: Union[int, str], is_target
                 Config.ADMIN_CACHE[chat_id] = result
                 return result
         
-        # Check specific permissions
         if required_perms and member.privileges:
             missing_perms = [
                 perm for perm in required_perms 
@@ -121,7 +117,6 @@ async def verify_permissions(client: Client, chat_id: Union[int, str], is_target
 
 async def process_message(client: Client, source_msg: Message, target_chat_id: int) -> bool:
     try:
-        # Skip unsupported message types
         if source_msg.service or source_msg.empty:
             return False
             
@@ -149,7 +144,6 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
                 )
                 return True
             else:
-                # Fallback for unsupported media types
                 modified_caption = modify_content(source_msg.caption or "", Config.OFFSET)
                 await client.copy_message(
                     chat_id=target_chat_id,
@@ -165,7 +159,7 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
                 chat_id=target_chat_id,
                 text=modified_text,
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=source_msg.reply_markup  # Preserve reply markup if any
+                reply_markup=source_msg.reply_markup
             )
             return True
             
@@ -314,7 +308,6 @@ async def set_target_chat(client: Client, message: Message):
     try:
         chat = await client.get_chat(chat_id)
         
-        # Verify permissions
         has_perms, perm_msg = await verify_permissions(client, chat.id, is_target=True)
         if not has_perms:
             return await message.reply(f"❌ Permission issue: {perm_msg}")
@@ -485,7 +478,6 @@ async def handle_message(client: Client, message: Message):
         return
     
     try:
-        # Check if message is a reply or contains a link
         if message.reply_to_message:
             source_msg = message.reply_to_message
             chat_id = source_msg.chat.username or f"-100{source_msg.chat.id}"
@@ -498,7 +490,6 @@ async def handle_message(client: Client, message: Message):
 
         if Config.BATCH_MODE:
             if Config.START_ID is None:
-                # Verify access to source channel
                 has_perms, perm_msg = await verify_permissions(client, chat_id)
                 if not has_perms:
                     Config.PROCESSING = False
@@ -575,7 +566,6 @@ async def process_batch(client: Client, message: Message):
                 else:
                     failed += 1
                 
-                # Update progress every 5 messages or every 10 seconds
                 now = asyncio.get_event_loop().time()
                 if (processed + failed) % 5 == 0 or now - last_update >= 10 or current_id == end_id:
                     progress = ((current_id - start_id) / total) * 100
@@ -595,7 +585,6 @@ async def process_batch(client: Client, message: Message):
                     except Exception as e:
                         print(f"Error updating progress: {e}")
                 
-                # Small delay to prevent flooding
                 await asyncio.sleep(0.3)
             
             except FloodWait as e:
