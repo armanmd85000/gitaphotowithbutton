@@ -1,8 +1,9 @@
 import re
 import asyncio
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode, ChatType, ChatMemberStatus
+from pyrogram.errors import FloodWait, RPCError
 
 # Bot Configuration
 API_ID = 20219694
@@ -13,10 +14,21 @@ class Config:
     OFFSET = 0
     REPLACEMENTS = {}
     TARGET_CHAT_ID = None
+    ADMIN_CACHE = {}
 
-app = Client("link_modifier_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client(
+    "advanced_link_modifier",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
-def modify_links(text: str, offset: int) -> str:
+# ======================
+# CORE FUNCTIONALITY
+# ======================
+
+def modify_content(text: str) -> str:
+    """Modify Telegram links in text with current offset"""
     if not text:
         return text
 
@@ -24,38 +36,68 @@ def modify_links(text: str, offset: int) -> str:
     for original, replacement in Config.REPLACEMENTS.items():
         text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
 
-    # Modify Telegram message IDs in links
+    # Modify Telegram links
     def replacer(match):
         prefix = match.group(1) or ""
         domain = match.group(2)
         chat_part = match.group(3) or ""
-        msg_id = int(match.group(4))
-        return f"{prefix}://{domain}/{chat_part}{msg_id + offset}"
+        chat_ref = match.group(4)
+        msg_id = int(match.group(5))
+        return f"{prefix}://{domain}/{chat_part}{chat_ref}/{msg_id + Config.OFFSET}"
 
     pattern = r'(https?://)?(t\.me|telegram\.(?:me|dog))/(c/)?([^/]+)/(\d+)'
     return re.sub(pattern, replacer, text)
 
-@app.on_message(filters.command(["start", "help"]))
-async def start_cmd(client: Client, message: Message):
-    help_text = """
-🤖 **Link Modifier Bot** 🚀
+async def verify_admin(client: Client, chat_id: int) -> bool:
+    """Check if bot is admin in chat"""
+    if chat_id in Config.ADMIN_CACHE:
+        return Config.ADMIN_CACHE[chat_id]
+    
+    try:
+        chat = await client.get_chat(chat_id)
+        if chat.type not in [ChatType.CHANNEL, ChatType.SUPERGROUP]:
+            Config.ADMIN_CACHE[chat_id] = False
+            return False
+            
+        member = await client.get_chat_member(chat.id, "me")
+        is_admin = member.status == ChatMemberStatus.ADMINISTRATOR
+        Config.ADMIN_CACHE[chat_id] = is_admin
+        return is_admin
+    except Exception:
+        return False
 
-🔹 **Basic Commands:**
+# ======================
+# COMMAND HANDLERS
+# ======================
+
+@app.on_message(filters.command("start"))
+async def start_cmd(client: Client, message: Message):
+    """Start command with bot information"""
+    help_text = """
+🤖 **Advanced Link Modifier Bot** 🚀
+
+🔹 **Core Commands:**
 /addnumber N - Add N to message IDs
 /lessnumber N - Subtract N from message IDs
+/remowords - Remove all word replacements
 /setchatid @channel - Set target channel
 
-🔹 **Word Replacement:**
-/removereplace WORD - Remove word replacement
+🔹 **Current Settings:**
+Offset: `{offset}`
+Target Chat: `{target_chat}`
+Word Replacements: `{replacements}`
 
-📌 **Requirements:**
-1. Add bot as admin in target channel
-2. Bot needs message posting permissions
-"""
+📌 **Note:** Bot needs admin in both source and target chats
+""".format(
+    offset=Config.OFFSET,
+    target_chat=Config.TARGET_CHAT_ID or "Not set",
+    replacements=len(Config.REPLACEMENTS)
+    
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
 
 @app.on_message(filters.command(["addnumber", "lessnumber"]))
-async def set_offset_cmd(client: Client, message: Message):
+async def offset_cmd(client: Client, message: Message):
+    """Handle addnumber/lessnumber commands"""
     if len(message.command) < 2:
         return await message.reply("⚠️ Usage: /addnumber 2 or /lessnumber 3")
     
@@ -68,24 +110,21 @@ async def set_offset_cmd(client: Client, message: Message):
             Config.OFFSET -= amount
             action = "Subtracted"
         
-        await message.reply(f"✅ {action} offset: {amount}\nNew offset: {Config.OFFSET}")
+        await message.reply(f"✅ {action} offset: {amount}\nNew offset: `{Config.OFFSET}`", 
+                          parse_mode=ParseMode.MARKDOWN)
     except ValueError:
         await message.reply("⚠️ Please provide a valid number")
 
-@app.on_message(filters.command("removereplace"))
-async def remove_replacement(client: Client, message: Message):
-    if len(message.command) < 2:
-        return await message.reply("⚠️ Usage: /removereplace WORD")
-    
-    word = message.command[1].lower()
-    if word in Config.REPLACEMENTS:
-        del Config.REPLACEMENTS[word]
-        await message.reply(f"✅ Removed replacement for `{word}`", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await message.reply(f"⚠️ No replacement found for `{word}`")
+@app.on_message(filters.command("remowords"))
+async def remowords_cmd(client: Client, message: Message):
+    """Remove all word replacements"""
+    count = len(Config.REPLACEMENTS)
+    Config.REPLACEMENTS = {}
+    await message.reply(f"✅ Removed all {count} word replacements")
 
 @app.on_message(filters.command("setchatid"))
-async def set_target_chat(client: Client, message: Message):
+async def setchatid_cmd(client: Client, message: Message):
+    """Set target chat ID"""
     if len(message.command) < 2:
         return await message.reply("⚠️ Usage: /setchatid @channel or -100123456789")
     
@@ -93,41 +132,56 @@ async def set_target_chat(client: Client, message: Message):
     try:
         chat = await client.get_chat(chat_id)
         
-        # Verify bot permissions
-        try:
-            member = await client.get_chat_member(chat.id, "me")
-            if member.status != ChatMemberStatus.ADMINISTRATOR:
-                return await message.reply("❌ Bot needs to be admin in the channel")
-            if not member.privileges.can_post_messages:
-                return await message.reply("❌ Bot needs message posting permissions")
-        except Exception as e:
-            return await message.reply(f"❌ Permission error: {str(e)}")
+        # Verify bot admin status
+        is_admin = await verify_admin(client, chat.id)
+        if not is_admin:
+            return await message.reply("❌ Bot must be admin in target chat")
         
         Config.TARGET_CHAT_ID = chat.id
+        Config.ADMIN_CACHE.clear()  # Clear cache
+        
         await message.reply(
             f"✅ Target chat set to:\n"
-            f"Title: {chat.title}\n"
+            f"Title: `{chat.title}`\n"
+            f"Type: `{chat.type}`\n"
             f"ID: `{chat.id}`",
             parse_mode=ParseMode.MARKDOWN
         )
     except Exception as e:
-        await message.reply(f"❌ Error setting chat ID: {str(e)}")
+        await message.reply(f"❌ Error: {str(e)}")
+
+# ======================
+# MESSAGE HANDLING
+# ======================
 
 @app.on_message(filters.text & ~filters.command)
-async def handle_message(client: Client, message: Message):
+async def handle_text_messages(client: Client, message: Message):
+    """Process all text messages containing Telegram links"""
     if not Config.TARGET_CHAT_ID:
         return
     
     try:
-        modified_text = modify_links(message.text, Config.OFFSET)
-        await client.send_message(
-            chat_id=Config.TARGET_CHAT_ID,
-            text=modified_text,
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except Exception as e:
-        await message.reply(f"❌ Error processing message: {str(e)}")
+        # Check if we're admin in source chat
+        if not await verify_admin(client, message.chat.id):
+            return
+        
+        modified_text = modify_content(message.text)
+        
+        if modified_text != message.text:
+            await client.send_message(
+                chat_id=Config.TARGET_CHAT_ID,
+                text=modified_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+    except RPCError as e:
+        print(f"Error processing message: {e}")
+
+# ======================
+# BOT STARTUP
+# ======================
 
 if __name__ == "__main__":
-    print("⚡ Link Modifier Bot Started!")
+    print("⚡ Advanced Link Modifier Bot Started!")
     app.run()
