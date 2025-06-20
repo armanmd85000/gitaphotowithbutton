@@ -48,7 +48,7 @@ def modify_content(text: str, offset: int) -> str:
         return text
 
     # Apply word replacements (case-insensitive with word boundaries)
-    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower())):
+    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower()):
         text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
 
     # Modify Telegram links
@@ -56,10 +56,12 @@ def modify_content(text: str, offset: int) -> str:
         prefix = match.group(1) or ""
         domain = match.group(2)
         chat_part = match.group(3) or ""
-        post_id = match.group(4)
-        return f"{prefix}{domain}/{chat_part}{int(post_id) + offset}"
+        chat_id = match.group(4)
+        post_id = match.group(5)
+        return f"{prefix}{domain}/{chat_part}{chat_id}/{int(post_id) + offset}"
 
-    pattern = r'(https?://)?(t\.me|telegram\.(?:me|dog))/(c/)?([^/]+)/(\d+)'
+    # Updated pattern to handle all Telegram link formats
+    pattern = r'(https?://)?(t\.me|telegram\.(?:me|dog))/(c/)?([^/\s]+)/(\d+)'
     return re.sub(pattern, replacer, text)
 
 async def verify_permissions(client: Client, chat_id: Union[int, str], is_target=False) -> Tuple[bool, str]:
