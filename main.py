@@ -51,13 +51,13 @@ def modify_content(text: str, offset: int) -> str:
     for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower())):
         text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
 
-    # Modify Telegram links
+    # Modify Telegram links properly without double slashes
     def replacer(match):
-        prefix = match.group(1) or ""
+        prefix = match.group(1) or "https://"
         domain = match.group(2)
-        chat_part = match.group(3)
+        chat_part = match.group(3) or ""
         msg_id = int(match.group(4))
-        return f"{prefix}://{domain}/{chat_part}/{msg_id + offset}"
+        return f"{prefix}{domain}/{chat_part}{msg_id + offset}"
 
     pattern = r'(https?://)?(t\.me|telegram\.(?:me|dog))/(c/)?([^/]+)/(\d+)'
     return re.sub(pattern, replacer, text)
