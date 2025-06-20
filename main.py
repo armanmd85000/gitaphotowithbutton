@@ -48,16 +48,16 @@ def modify_content(text: str, offset: int) -> str:
         return text
 
     # Apply word replacements (case-insensitive with word boundaries)
-    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower())):
+    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower()):
         text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
 
-    # Modify Telegram links properly without double slashes
+    # Modify Telegram links
     def replacer(match):
-        prefix = match.group(1) or "https://"
+        prefix = match.group(1) or ""
         domain = match.group(2)
         chat_part = match.group(3) or ""
         msg_id = int(match.group(4))
-        return f"{prefix}{domain}/{chat_part}{msg_id + offset}"
+        return f"{prefix}://{domain}/{chat_part}{msg_id + offset}"
 
     pattern = r'(https?://)?(t\.me|telegram\.(?:me|dog))/(c/)?([^/]+)/(\d+)'
     return re.sub(pattern, replacer, text)
@@ -211,24 +211,10 @@ async def start_cmd(client: Client, message: Message):
 /chatinfo - Check current chat info
 /checkperms - Verify bot permissions
 
-🔹 **Message Filters:**
-/filtertypes - Show current filters
-/enablefilter TYPE - Enable message type
-/disablefilter TYPE - Disable message type
-
-🔹 **System:**
-/reset - Reset all settings
-/status - Show current configuration
-
 📌 **Requirements:**
 1. Add bot as admin in BOTH source and target
 2. In target: Enable 'Post Messages' permission
 3. In source: Enable 'Read Messages' permission
-
-🛠 **Usage Tips:**
-• For private channels, use the channel ID (-100...)
-• The bot must be admin in both channels
-• Use /batch in the source chat for best results
 """
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -325,35 +311,6 @@ async def set_target_chat(client: Client, message: Message):
     except Exception as e:
         await message.reply(f"❌ Error setting chat ID: {str(e)}")
 
-@app.on_message(filters.command(["filtertypes", "filters"]))
-async def show_filters(client: Client, message: Message):
-    filters_text = "\n".join(
-        f"• {type_.upper()}: {'✅' if enabled else '❌'}"
-        for type_, enabled in Config.MESSAGE_FILTERS.items()
-    )
-    await message.reply(
-        f"🔍 Current Message Filters:\n\n{filters_text}\n\n"
-        f"Use /enablefilter or /disablefilter to change",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-@app.on_message(filters.command(["enablefilter", "disablefilter"]))
-async def toggle_filter(client: Client, message: Message):
-    if len(message.command) < 2:
-        return await message.reply("⚠️ Usage: /enablefilter text OR /disablefilter photo")
-    
-    filter_type = message.command[1].lower()
-    if filter_type not in Config.MESSAGE_FILTERS:
-        return await message.reply(f"⚠️ Invalid filter type. Available: {', '.join(Config.MESSAGE_FILTERS.keys())}")
-    
-    is_enable = message.command[0] == "enablefilter"
-    Config.MESSAGE_FILTERS[filter_type] = is_enable
-    
-    await message.reply(
-        f"✅ {'Enabled' if is_enable else 'Disabled'} filter for: {filter_type.upper()}\n\n"
-        f"Current status: {'✅' if Config.MESSAGE_FILTERS[filter_type] else '❌'}"
-    )
-
 @app.on_message(filters.command("chatinfo"))
 async def chat_info(client: Client, message: Message):
     try:
@@ -403,7 +360,6 @@ async def show_status(client: Client, message: Message):
         f"Batch Mode: {'✅' if Config.BATCH_MODE else '❌'}\n"
         f"Current Offset: {Config.OFFSET}\n"
         f"Word Replacements: {len(Config.REPLACEMENTS)}\n"
-        f"Active Filters: {sum(Config.MESSAGE_FILTERS.values())}/{len(Config.MESSAGE_FILTERS)}\n"
     )
     
     if Config.TARGET_CHAT_ID:
@@ -425,13 +381,6 @@ async def reset_settings(client: Client, message: Message):
     Config.END_ID = None
     Config.TARGET_CHAT_ID = None
     Config.REPLACEMENTS = {}
-    Config.MESSAGE_FILTERS = {
-        'text': True,
-        'photo': True,
-        'video': True,
-        'document': True,
-        'audio': True
-    }
     
     if Config.CURRENT_TASK:
         Config.CURRENT_TASK.cancel()
