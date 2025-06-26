@@ -1,5 +1,6 @@
 import re
 import asyncio
+import time
 from typing import Optional, Tuple, Dict, Union, List
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -50,12 +51,22 @@ app = Client(
 def is_not_command(_, __, message: Message) -> bool:
     return not message.text.startswith('/')
 
+def parse_message_link(text: str) -> Optional[Tuple[Union[int, str], int]]:
+    """Parse Telegram message link and return (chat_id, message_id) tuple"""
+    pattern = r'(?:https?://)?(?:t\.me|telegram\.(?:me|dog))/(?:c/)?([^/\s]+)/(\d+)'
+    match = re.search(pattern, text)
+    if match:
+        chat_id = match.group(1)
+        message_id = int(match.group(2))
+        return (chat_id, message_id)
+    return None
+
 def modify_content(text: str, offset: int) -> str:
     if not text:
         return text
 
     # Apply word replacements (case-insensitive with word boundaries)
-    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower()):
+    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower())):
         text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
 
     # Modify Telegram links
@@ -111,9 +122,9 @@ async def verify_permissions(client: Client, chat_id: Union[int, str]) -> Tuple[
         return result
         
     except (ChannelInvalid, PeerIdInvalid):
-        return False, "Invalid chat ID"
+        return (False, "Invalid chat ID")
     except Exception as e:
-        return False, f"Error: {str(e)}"
+        return (False, f"Error: {str(e)}")
 
 async def process_message(client: Client, source_msg: Message, target_chat_id: int) -> bool:
     for attempt in range(Config.MAX_RETRIES):
@@ -138,19 +149,21 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
                 }
                 
                 if media_type in media_mapping:
-                    await media_mapping[media_type](
-                        chat_id=target_chat_id,
-                        **{media_type.value: getattr(source_msg, media_type.value).file_id},
-                        caption=modified_caption if media_type != MessageMediaType.STICKER else None,
-                        parse_mode=ParseMode.MARKDOWN
-                    )
+                    kwargs = {
+                        'chat_id': target_chat_id,
+                        'caption': modified_caption if media_type != MessageMediaType.STICKER else None,
+                        'parse_mode': ParseMode.MARKDOWN
+                    }
+                    kwargs[media_type.value] = getattr(source_msg, media_type.value).file_id
+                    
+                    await media_mapping[media_type](**kwargs)
                     return True
                 else:
                     await client.copy_message(
                         chat_id=target_chat_id,
                         from_chat_id=source_msg.chat.id,
                         message_id=source_msg.id,
-                        caption=modify_content(source_msg.caption or "", Config.OFFSET),
+                        caption=modified_caption,
                         parse_mode=ParseMode.MARKDOWN
                     )
                     return True
@@ -216,7 +229,128 @@ async def start_cmd(client: Client, message: Message):
 """
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
 
-# [Previous command handlers for offset, replacements, filters etc...]
+@app.on_message(filters.command(["addnumber", "addnum"]))
+async def add_offset(client: Client, message: Message):
+    try:
+        offset = int(message.command[1])
+        Config.OFFSET += offset
+        await message.reply(f"✅ Offset increased by {offset}. New offset: {Config.OFFSET}")
+    except (IndexError, ValueError):
+        await message.reply("❌ Please provide a valid number to add")
+
+@app.on_message(filters.command(["lessnumber", "lessnum"]))
+async def subtract_offset(client: Client, message: Message):
+    try:
+        offset = int(message.command[1])
+        Config.OFFSET -= offset
+        await message.reply(f"✅ Offset decreased by {offset}. New offset: {Config.OFFSET}")
+    except (IndexError, ValueError):
+        await message.reply("❌ Please provide a valid number to subtract")
+
+@app.on_message(filters.command("setoffset"))
+async def set_offset(client: Client, message: Message):
+    try:
+        offset = int(message.command[1])
+        Config.OFFSET = offset
+        await message.reply(f"✅ Offset set to {Config.OFFSET}")
+    except (IndexError, ValueError):
+        await message.reply("❌ Please provide a valid offset number")
+
+@app.on_message(filters.command("replacewords"))
+async def show_replacements(client: Client, message: Message):
+    if not Config.REPLACEMENTS:
+        await message.reply("ℹ️ No word replacements set")
+        return
+    
+    replacements_text = "🔹 Current Word Replacements:\n"
+    for original, replacement in Config.REPLACEMENTS.items():
+        replacements_text += f"▫️ `{original}` → `{replacement}`\n"
+    
+    await message.reply(replacements_text, parse_mode=ParseMode.MARKDOWN)
+
+@app.on_message(filters.command("addreplace"))
+async def add_replacement(client: Client, message: Message):
+    try:
+        original = message.command[1]
+        replacement = message.command[2]
+        Config.REPLACEMENTS[original] = replacement
+        await message.reply(f"✅ Added replacement: `{original}` → `{replacement}`", parse_mode=ParseMode.MARKDOWN)
+    except IndexError:
+        await message.reply("❌ Usage: /addreplace ORIGINAL REPLACEMENT")
+
+@app.on_message(filters.command("removereplace"))
+async def remove_replacement(client: Client, message: Message):
+    try:
+        word = message.command[1]
+        if word in Config.REPLACEMENTS:
+            del Config.REPLACEMENTS[word]
+            await message.reply(f"✅ Removed replacement for `{word}`", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await message.reply(f"❌ No replacement found for `{word}`", parse_mode=ParseMode.MARKDOWN)
+    except IndexError:
+        await message.reply("❌ Please specify a word to remove")
+
+@app.on_message(filters.command("filtertypes"))
+async def show_filters(client: Client, message: Message):
+    filters_text = "🔹 Current Message Filters:\n"
+    for filter_type, enabled in Config.MESSAGE_FILTERS.items():
+        status = "✅ Enabled" if enabled else "❌ Disabled"
+        filters_text += f"▫️ {filter_type}: {status}\n"
+    
+    await message.reply(filters_text)
+
+@app.on_message(filters.command("enablefilter"))
+async def enable_filter(client: Client, message: Message):
+    try:
+        filter_type = message.command[1].lower()
+        if filter_type in Config.MESSAGE_FILTERS:
+            Config.MESSAGE_FILTERS[filter_type] = True
+            await message.reply(f"✅ Enabled {filter_type} messages")
+        else:
+            await message.reply(f"❌ Invalid filter type. Available types: {', '.join(Config.MESSAGE_FILTERS.keys())}")
+    except IndexError:
+        await message.reply("❌ Please specify a filter type to enable")
+
+@app.on_message(filters.command("disablefilter"))
+async def disable_filter(client: Client, message: Message):
+    try:
+        filter_type = message.command[1].lower()
+        if filter_type in Config.MESSAGE_FILTERS:
+            Config.MESSAGE_FILTERS[filter_type] = False
+            await message.reply(f"✅ Disabled {filter_type} messages")
+        else:
+            await message.reply(f"❌ Invalid filter type. Available types: {', '.join(Config.MESSAGE_FILTERS.keys())}")
+    except IndexError:
+        await message.reply("❌ Please specify a filter type to disable")
+
+@app.on_message(filters.command("status"))
+async def show_status(client: Client, message: Message):
+    status_text = f"""
+🔹 **Current Configuration**
+▫️ Offset: {Config.OFFSET}
+▫️ Replacements: {len(Config.REPLACEMENTS)}
+▫️ Processing: {'✅ Yes' if Config.PROCESSING else '❌ No'}
+▫️ Batch Mode: {'✅ Yes' if Config.BATCH_MODE else '❌ No'}
+▫️ Message Filters: {sum(Config.MESSAGE_FILTERS.values())}/{len(Config.MESSAGE_FILTERS)} enabled
+"""
+    await message.reply(status_text, parse_mode=ParseMode.MARKDOWN)
+
+@app.on_message(filters.command("reset"))
+async def reset_config(client: Client, message: Message):
+    Config.OFFSET = 0
+    Config.REPLACEMENTS = {}
+    Config.PROCESSING = False
+    Config.BATCH_MODE = False
+    Config.CHAT_ID = None
+    Config.START_ID = None
+    Config.END_ID = None
+    Config.MESSAGE_FILTERS = {k: True for k in Config.MESSAGE_FILTERS}
+    
+    if Config.CURRENT_TASK:
+        Config.CURRENT_TASK.cancel()
+        Config.CURRENT_TASK = None
+    
+    await message.reply("✅ All settings have been reset to defaults")
 
 @app.on_message(filters.command("batch"))
 async def start_batch(client: Client, message: Message):
@@ -242,6 +376,7 @@ async def stop_cmd(client: Client, message: Message):
         Config.PROCESSING = False
         if Config.CURRENT_TASK:
             Config.CURRENT_TASK.cancel()
+            Config.CURRENT_TASK = None
         await message.reply("✅ Processing stopped")
     else:
         await message.reply("⚠️ No active process")
