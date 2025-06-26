@@ -19,8 +19,8 @@ class Config:
     OFFSET = 0
     PROCESSING = False
     BATCH_MODE = False
-    SOURCE_CHAT = None  # Now storing chat object instead of just ID
-    TARGET_CHAT = None  # Added target chat storage
+    SOURCE_CHAT = None
+    TARGET_CHAT = None
     START_ID = None
     END_ID = None
     CURRENT_TASK = None
@@ -66,7 +66,7 @@ def modify_content(text: str, offset: int) -> str:
     if not text:
         return text
 
-    # Apply word replacements (case-insensitive with word boundaries)
+    # Apply word replacements
     for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower())):
         text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
 
@@ -84,7 +84,7 @@ def modify_content(text: str, offset: int) -> str:
 
 async def verify_permissions(client: Client, chat_id: Union[int, str]) -> Tuple[bool, str]:
     try:
-        if isinstance(chat_id, str) and chat_id.startswith('@'):
+        if isinstance(chat_id, str):
             chat = await client.get_chat(chat_id)
             chat_id = chat.id
 
@@ -206,36 +206,26 @@ async def start_cmd(client: Client, message: Message):
 - Comprehensive media support
 - Automatic retry mechanism
 
-🔹 **Chat Management:**
+🔹 **Basic Commands:**
 /setchat source [chat] - Set source chat
 /setchat target [chat] - Set target chat
-/showchat - Show current chat settings
-/clearchat [source|target|all] - Clear chat settings
-
-🔹 **Basic Commands:**
 /batch - Start batch processing
 /addnumber N - Add offset N
 /lessnumber N - Subtract offset N
 /setoffset N - Set absolute offset
 /stop - Cancel current operation
 
-🔹 **Word Replacement:**
+🔹 **Advanced Commands:**
 /replacewords - View replacements
 /addreplace ORIG REPL - Add replacement
 /removereplace WORD - Remove replacement
-
-🔹 **Message Filters:**
 /filtertypes - Show filters
 /enablefilter TYPE - Enable filter
 /disablefilter TYPE - Disable filter
 
-🔹 **System:**
+🔹 **System Commands:**
 /status - Show current config
 /reset - Reset all settings
-
-📌 **Note:** 
-- Bot must be admin in both chats
-- Works best in supergroups/channels
 """
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -498,13 +488,19 @@ async def handle_message(client: Client, message: Message):
     try:
         if message.reply_to_message:
             source_msg = message.reply_to_message
-            chat_id = source_msg.chat.username or f"-100{abs(source_msg.chat.id)}"
+            chat_id = source_msg.chat.id
             msg_id = source_msg.id
         else:
             link_info = parse_message_link(message.text)
             if not link_info:
                 return await message.reply("❌ Invalid message link")
             chat_id, msg_id = link_info
+            if isinstance(chat_id, str):
+                try:
+                    chat = await client.get_chat(chat_id)
+                    chat_id = chat.id
+                except Exception as e:
+                    return await message.reply(f"❌ Could not resolve chat: {str(e)}")
 
         if Config.BATCH_MODE:
             if Config.START_ID is None:
@@ -519,8 +515,10 @@ async def handle_message(client: Client, message: Message):
                     f"Now reply to the LAST message or send its link"
                 )
             elif Config.END_ID is None:
-                if chat_id != (Config.SOURCE_CHAT.username or f"-100{abs(Config.SOURCE_CHAT.id)}"):
-                    return await message.reply("❌ Both messages must be from same chat")
+                source_chat_id = Config.SOURCE_CHAT.id if Config.SOURCE_CHAT else None
+                
+                if chat_id != source_chat_id:
+                    return await message.reply("❌ Both messages must be from the same chat as the source chat")
                 
                 Config.END_ID = msg_id
                 Config.CURRENT_TASK = asyncio.create_task(process_batch(client, message))
@@ -553,7 +551,7 @@ async def process_batch(client: Client, message: Message):
         
         target_chat = Config.TARGET_CHAT.id if Config.TARGET_CHAT else message.chat.id
         
-        # Verify permissions again before starting
+        # Verify permissions
         has_perms, perm_msg = await verify_permissions(client, Config.SOURCE_CHAT.id)
         if not has_perms:
             await message.reply(f"❌ Source chat permission error: {perm_msg}")
