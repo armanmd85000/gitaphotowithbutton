@@ -10,7 +10,7 @@ from pyrogram.errors import (
     ChatAdminRequired, PeerIdInvalid, UserNotParticipant, BadRequest
 )
 
-# Bot Configuration
+# ====================== CONFIGURATION ======================
 API_ID = 20219694
 API_HASH = "29d9b3a01721ab452fcae79346769e29"
 BOT_TOKEN = "8139601508:AAE9mf6S5BrwW9ADfEh3RMnWwBKWAtLOjBc"
@@ -41,6 +41,7 @@ class Config:
     }
     MAX_RETRIES = 3
     DELAY_BETWEEN_MESSAGES = 0.3
+    MAX_MESSAGES_PER_BATCH = 1000
 
 app = Client(
     "ultimate_batch_link_modifier",
@@ -49,6 +50,7 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
+# ====================== UTILITY FUNCTIONS ======================
 def is_not_command(_, __, message: Message) -> bool:
     return not message.text.startswith('/')
 
@@ -195,10 +197,11 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
     
     return False
 
+# ====================== COMMAND HANDLERS ======================
 @app.on_message(filters.command(["start", "help"]))
 async def start_cmd(client: Client, message: Message):
     help_text = """
-🚀 **Ultimate Batch Link Modifier Bot** 🚀
+🚀 **Ultimate Batch Link Modifier Bot** �
 
 🔹 **Core Features:**
 - Batch process messages with ID offset
@@ -486,6 +489,7 @@ async def handle_message(client: Client, message: Message):
         return
     
     try:
+        # Get source message details
         if message.reply_to_message:
             source_msg = message.reply_to_message
             chat_id = source_msg.chat.id
@@ -494,20 +498,27 @@ async def handle_message(client: Client, message: Message):
             link_info = parse_message_link(message.text)
             if not link_info:
                 return await message.reply("❌ Invalid message link")
-            chat_id, msg_id = link_info
-            if isinstance(chat_id, str):
-                try:
-                    chat = await client.get_chat(chat_id)
-                    chat_id = chat.id
-                except Exception as e:
-                    return await message.reply(f"❌ Could not resolve chat: {str(e)}")
+            
+            chat_identifier, msg_id = link_info
+            
+            # Resolve the chat properly
+            try:
+                chat = await client.get_chat(chat_identifier)
+                chat_id = chat.id
+            except Exception as e:
+                return await message.reply(f"❌ Could not resolve chat: {str(e)}")
 
         if Config.BATCH_MODE:
             if Config.START_ID is None:
+                # First message of batch
                 has_perms, perm_msg = await verify_permissions(client, chat_id)
                 if not has_perms:
                     Config.PROCESSING = False
                     return await message.reply(f"❌ Permission error: {perm_msg}")
+                
+                # Verify this is same chat as source chat
+                if Config.SOURCE_CHAT and chat_id != Config.SOURCE_CHAT.id:
+                    return await message.reply("❌ First message must be from the source chat")
                 
                 Config.START_ID = msg_id
                 await message.reply(
@@ -515,14 +526,19 @@ async def handle_message(client: Client, message: Message):
                     f"Now reply to the LAST message or send its link"
                 )
             elif Config.END_ID is None:
-                source_chat_id = Config.SOURCE_CHAT.id if Config.SOURCE_CHAT else None
+                # Second message of batch
+                if not Config.SOURCE_CHAT:
+                    Config.PROCESSING = False
+                    return await message.reply("❌ Source chat not set")
                 
-                if chat_id != source_chat_id:
-                    return await message.reply("❌ Both messages must be from the same chat as the source chat")
+                # Verify same chat as source
+                if chat_id != Config.SOURCE_CHAT.id:
+                    return await message.reply("❌ Last message must be from the same chat as source chat")
                 
                 Config.END_ID = msg_id
                 Config.CURRENT_TASK = asyncio.create_task(process_batch(client, message))
         else:
+            # Single message processing
             try:
                 msg = await client.get_messages(chat_id, msg_id)
                 if msg and not msg.empty:
@@ -549,6 +565,11 @@ async def process_batch(client: Client, message: Message):
         end_id = max(Config.START_ID, Config.END_ID)
         total = end_id - start_id + 1
         
+        if total > Config.MAX_MESSAGES_PER_BATCH:
+            await message.reply(f"❌ Batch too large ({total} messages). Max allowed: {Config.MAX_MESSAGES_PER_BATCH}")
+            Config.PROCESSING = False
+            return
+            
         target_chat = Config.TARGET_CHAT.id if Config.TARGET_CHAT else message.chat.id
         
         # Verify permissions
