@@ -13,7 +13,7 @@ from pyrogram.errors import (
 # ====================== CONFIGURATION ======================
 API_ID = 20219694
 API_HASH = "29d9b3a01721ab452fcae79346769e29"
-BOT_TOKEN = "8139601508:AAE9mf6S5BrwW9ADfEh3RMnWwBKWAtLOjBc"
+BOT_TOKEN = "7919295360:AAFjL1hc8VU4qBPkgUI3YLUP3rL9byUHhp8"
 
 class Config:
     OFFSET = 0
