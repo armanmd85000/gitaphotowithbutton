@@ -40,7 +40,7 @@ class Config:
     }
     MAX_RETRIES = 3
     DELAY_BETWEEN_MESSAGES = 0.3
-    MAX_MESSAGES_PER_BATCH = 10000  # Updated to 10,000
+    MAX_MESSAGES_PER_BATCH = 100000  # Updated to 100,000
 
 app = Client(
     "ultimate_batch_link_modifier",
@@ -206,28 +206,32 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
     return False
 
 async def process_photo_with_link(client: Client, source_msg: Message, target_chat_id: int) -> bool:
-    """Process photo message and send with original link"""
+    """Process photo message and send with link included in caption"""
     for attempt in range(Config.MAX_RETRIES):
         try:
             if source_msg.service or source_msg.empty or not source_msg.photo:
                 return False
             
-            # Send the photo with its caption
+            # Get the original caption and modify it
             caption = source_msg.caption or ""
             modified_caption = modify_content(caption, Config.OFFSET)
             
+            # Generate the message link
+            message_link = generate_message_link(source_msg.chat, source_msg.id)
+            
+            # Combine caption with link
+            if modified_caption:
+                # If there's existing caption, add link after it
+                final_caption = f"{modified_caption}\n\n🔗 **Link:** {message_link}"
+            else:
+                # If no caption, just add the link
+                final_caption = f"🔗 **Link:** {message_link}"
+            
+            # Send the photo with combined caption
             await client.send_photo(
                 chat_id=target_chat_id,
                 photo=source_msg.photo.file_id,
-                caption=modified_caption,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-            # Generate and send the original message link
-            original_link = generate_message_link(source_msg.chat, source_msg.id)
-            await client.send_message(
-                chat_id=target_chat_id,
-                text=f"🔗 **Original Link:** {original_link}",
+                caption=final_caption,
                 parse_mode=ParseMode.MARKDOWN
             )
             
@@ -255,7 +259,7 @@ async def start_cmd(client: Client, message: Message):
 - Batch process messages with ID offset
 - Smart word replacement system
 - Comprehensive media support
-- **NEW: Photo forwarding with original links**
+- **NEW: Photo forwarding with links**
 - Automatic retry mechanism
 
 🔹 **Basic Commands:**
@@ -281,11 +285,11 @@ async def start_cmd(client: Client, message: Message):
 /reset - Reset all settings
 
 🔹 **Photo Forward Mode:**
-Use /photoforward to start forwarding photos with original chat links.
+Use /photoforward to start forwarding photos with links.
 Bot will ask for start and end message links, then forward only photos
-with their captions and original message links.
+with their captions and message links COMBINED in the caption.
 
-🔹 **Batch Limit:** Up to 10,000 messages per batch
+🔹 **Batch Limit:** Up to 100,000 messages per batch
 """
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -311,10 +315,10 @@ async def start_photo_forward(client: Client, message: Message):
         f"📝 **Instructions:**\n"
         f"1. Reply to the FIRST message or send its link\n"
         f"2. Bot will filter and forward only photos\n"
-        f"3. Each photo will be followed by its original chat link\n\n"
+        f"3. Link will be included in photo caption\n\n"
         f"🔗 **Example output:**\n"
-        f"[Photo with caption]\n"
-        f"🔗 Original Link: https://t.me/c/123456/789",
+        f"[Photo with original caption]\n\n"
+        f"🔗 Link: https://t.me/c/123456/789",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -654,7 +658,7 @@ async def handle_message(client: Client, message: Message):
         Config.PHOTO_FORWARD_MODE = False
 
 async def process_photo_batch(client: Client, message: Message):
-    """Process batch of messages, filtering and forwarding only photos with original links"""
+    """Process batch of messages, filtering and forwarding only photos with links"""
     try:
         if not Config.SOURCE_CHAT:
             await message.reply("❌ Source chat not set")
@@ -691,7 +695,7 @@ async def process_photo_batch(client: Client, message: Message):
             f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else message.chat.title}\n"
             f"▫️ Range: {start_id:,}-{end_id:,}\n"
             f"▫️ Total Messages: {total:,}\n"
-            f"▫️ Filter: Photos only\n",
+            f"▫️ Filter: Photos only with links in caption\n",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -857,8 +861,15 @@ if __name__ == "__main__":
     print(f"📊 Max Batch Size: {Config.MAX_MESSAGES_PER_BATCH:,} messages")
     try:
         app.start()
+        print("✅ Bot started successfully!")
         idle()
+    except KeyboardInterrupt:
+        print("\n⚠️ Bot stopped by user")
     except Exception as e:
-        print(f"Fatal error: {e}")
+        print(f"❌ Fatal error: {e}")
     finally:
-        app.stop()
+        try:
+            app.stop()
+            print("✅ Bot stopped gracefully")
+        except:
+            print("⚠️ Bot was already stopped")
