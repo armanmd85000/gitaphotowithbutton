@@ -11,9 +11,7 @@ from pyrogram.errors import (
 )
 
 # ====================== CONFIGURATION ======================
-API_ID = 25570420
-API_HASH = "6591643fa39b5b9d0eb78cb24db17f69"
-BOT_TOKEN = "7266694108:AAHQOIAI19gcG7Axpil1DAmDdl0aPYVNY-w"  # Define your bot token here
+from config import API_ID, API_HASH, BOT_TOKEN
 
 class Config:
     OFFSET = 0
@@ -42,7 +40,7 @@ class Config:
     }
     MAX_RETRIES = 3
     DELAY_BETWEEN_MESSAGES = 0.3
-    MAX_MESSAGES_PER_BATCH = 1000
+    MAX_MESSAGES_PER_BATCH = 10000  # Updated to 10,000
 
 app = Client(
     "ultimate_batch_link_modifier",
@@ -286,6 +284,8 @@ async def start_cmd(client: Client, message: Message):
 Use /photoforward to start forwarding photos with original chat links.
 Bot will ask for start and end message links, then forward only photos
 with their captions and original message links.
+
+🔹 **Batch Limit:** Up to 10,000 messages per batch
 """
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -306,7 +306,8 @@ async def start_photo_forward(client: Client, message: Message):
     await message.reply(
         f"📸 **Photo Forward Mode Activated**\n"
         f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
-        f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else 'Current Chat'}\n\n"
+        f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else 'Current Chat'}\n"
+        f"▫️ Max Batch Size: {Config.MAX_MESSAGES_PER_BATCH:,} messages\n\n"
         f"📝 **Instructions:**\n"
         f"1. Reply to the FIRST message or send its link\n"
         f"2. Bot will filter and forward only photos\n"
@@ -420,6 +421,7 @@ async def show_status(client: Client, message: Message):
 ▫️ Processing: {'✅ Yes' if Config.PROCESSING else '❌ No'}
 ▫️ Batch Mode: {'✅ Yes' if Config.BATCH_MODE else '❌ No'}
 ▫️ Photo Forward Mode: {'✅ Yes' if Config.PHOTO_FORWARD_MODE else '❌ No'}
+▫️ Max Batch Size: {Config.MAX_MESSAGES_PER_BATCH:,} messages
 ▫️ Message Filters: {sum(Config.MESSAGE_FILTERS.values())}/{len(Config.MESSAGE_FILTERS)} enabled
 """
     if Config.SOURCE_CHAT:
@@ -556,7 +558,8 @@ async def start_batch(client: Client, message: Message):
         f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
         f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else 'Current Chat'}\n"
         f"▫️ Offset: {Config.OFFSET}\n"
-        f"▫️ Replacements: {len(Config.REPLACEMENTS)}\n\n"
+        f"▫️ Replacements: {len(Config.REPLACEMENTS)}\n"
+        f"▫️ Max Batch Size: {Config.MAX_MESSAGES_PER_BATCH:,} messages\n\n"
         f"Reply to the FIRST message or send its link"
     )
 
@@ -663,7 +666,7 @@ async def process_photo_batch(client: Client, message: Message):
         total = end_id - start_id + 1
         
         if total > Config.MAX_MESSAGES_PER_BATCH:
-            await message.reply(f"❌ Batch too large ({total} messages). Max allowed: {Config.MAX_MESSAGES_PER_BATCH}")
+            await message.reply(f"❌ Batch too large ({total:,} messages). Max allowed: {Config.MAX_MESSAGES_PER_BATCH:,}")
             Config.PROCESSING = False
             return
             
@@ -686,8 +689,8 @@ async def process_photo_batch(client: Client, message: Message):
             f"📸 **Photo Forward Processing Started**\n"
             f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
             f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else message.chat.title}\n"
-            f"▫️ Range: {start_id}-{end_id}\n"
-            f"▫️ Total Messages: {total}\n"
+            f"▫️ Range: {start_id:,}-{end_id:,}\n"
+            f"▫️ Total Messages: {total:,}\n"
             f"▫️ Filter: Photos only\n",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -715,10 +718,10 @@ async def process_photo_batch(client: Client, message: Message):
                         await progress_msg.edit(
                             f"📸 **Processing Photo Batch**\n"
                             f"▫️ Progress: {progress:.1f}%\n"
-                            f"▫️ Current: {current_id}\n"
-                            f"📝 Checked: {processed}\n"
-                            f"📸 Photos Found: {photos_found}\n"
-                            f"❌ Failed: {failed}"
+                            f"▫️ Current: {current_id:,}\n"
+                            f"📝 Checked: {processed:,}\n"
+                            f"📸 Photos Found: {photos_found:,}\n"
+                            f"❌ Failed: {failed:,}"
                         )
                         last_update = time.time()
                     except:
@@ -737,10 +740,10 @@ async def process_photo_batch(client: Client, message: Message):
             success_photos = photos_found - failed
             await progress_msg.edit(
                 f"✅ **Photo Forward Complete!**\n"
-                f"📝 Total Messages Checked: {processed}\n"
-                f"📸 Photos Found: {photos_found}\n"
-                f"✅ Successfully Forwarded: {success_photos}\n"
-                f"❌ Failed: {failed}\n"
+                f"📝 Total Messages Checked: {processed:,}\n"
+                f"📸 Photos Found: {photos_found:,}\n"
+                f"✅ Successfully Forwarded: {success_photos:,}\n"
+                f"❌ Failed: {failed:,}\n"
                 f"📊 Success Rate: {(success_photos/photos_found)*100:.1f}%" if photos_found > 0 else "📊 No photos found"
             )
     
@@ -763,7 +766,7 @@ async def process_batch(client: Client, message: Message):
         total = end_id - start_id + 1
         
         if total > Config.MAX_MESSAGES_PER_BATCH:
-            await message.reply(f"❌ Batch too large ({total} messages). Max allowed: {Config.MAX_MESSAGES_PER_BATCH}")
+            await message.reply(f"❌ Batch too large ({total:,} messages). Max allowed: {Config.MAX_MESSAGES_PER_BATCH:,}")
             Config.PROCESSING = False
             return
             
@@ -786,8 +789,8 @@ async def process_batch(client: Client, message: Message):
             f"⚡ **Batch Processing Started**\n"
             f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
             f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else message.chat.title}\n"
-            f"▫️ Range: {start_id}-{end_id}\n"
-            f"▫️ Total: {total} messages\n"
+            f"▫️ Range: {start_id:,}-{end_id:,}\n"
+            f"▫️ Total: {total:,} messages\n"
             f"▫️ Offset: {Config.OFFSET}\n",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -816,9 +819,9 @@ async def process_batch(client: Client, message: Message):
                         await progress_msg.edit(
                             f"⚡ **Processing Batch**\n"
                             f"▫️ Progress: {progress:.1f}%\n"
-                            f"▫️ Current: {current_id}\n"
-                            f"✅ Success: {processed}\n"
-                            f"❌ Failed: {failed}"
+                            f"▫️ Current: {current_id:,}\n"
+                            f"✅ Success: {processed:,}\n"
+                            f"❌ Failed: {failed:,}"
                         )
                         last_update = time.time()
                     except:
@@ -836,9 +839,9 @@ async def process_batch(client: Client, message: Message):
         if Config.PROCESSING:
             await progress_msg.edit(
                 f"✅ **Batch Complete!**\n"
-                f"▫️ Total: {total}\n"
-                f"✅ Success: {processed}\n"
-                f"❌ Failed: {failed}\n"
+                f"▫️ Total: {total:,}\n"
+                f"✅ Success: {processed:,}\n"
+                f"❌ Failed: {failed:,}\n"
                 f"▫️ Success Rate: {(processed/total)*100:.1f}%"
             )
     
@@ -851,6 +854,7 @@ async def process_batch(client: Client, message: Message):
 
 if __name__ == "__main__":
     print("⚡ Ultimate Batch Link Modifier Bot Started!")
+    print(f"📊 Max Batch Size: {Config.MAX_MESSAGES_PER_BATCH:,} messages")
     try:
         app.start()
         idle()
