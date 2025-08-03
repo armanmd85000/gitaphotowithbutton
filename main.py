@@ -19,6 +19,7 @@ class Config:
     OFFSET = 0
     PROCESSING = False
     BATCH_MODE = False
+    PHOTO_FORWARD_MODE = False  # New mode for photo forwarding
     SOURCE_CHAT = None
     TARGET_CHAT = None
     START_ID = None
@@ -63,6 +64,15 @@ def parse_message_link(text: str) -> Optional[Tuple[Union[int, str], int]]:
         message_id = int(match.group(2))
         return (chat_id, message_id)
     return None
+
+def generate_message_link(chat: object, message_id: int) -> str:
+    """Generate message link for a chat and message ID"""
+    if hasattr(chat, 'username') and chat.username:
+        return f"https://t.me/{chat.username}/{message_id}"
+    else:
+        # For private channels/groups, use the c/ format with chat ID
+        chat_id_str = str(chat.id).replace('-100', '')
+        return f"https://t.me/c/{chat_id_str}/{message_id}"
 
 def modify_content(text: str, offset: int) -> str:
     if not text:
@@ -197,22 +207,64 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
     
     return False
 
+async def process_photo_with_link(client: Client, source_msg: Message, target_chat_id: int) -> bool:
+    """Process photo message and send with original link"""
+    for attempt in range(Config.MAX_RETRIES):
+        try:
+            if source_msg.service or source_msg.empty or not source_msg.photo:
+                return False
+            
+            # Send the photo with its caption
+            caption = source_msg.caption or ""
+            modified_caption = modify_content(caption, Config.OFFSET)
+            
+            await client.send_photo(
+                chat_id=target_chat_id,
+                photo=source_msg.photo.file_id,
+                caption=modified_caption,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Generate and send the original message link
+            original_link = generate_message_link(source_msg.chat, source_msg.id)
+            await client.send_message(
+                chat_id=target_chat_id,
+                text=f"🔗 **Original Link:** {original_link}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return True
+            
+        except FloodWait as e:
+            if attempt == Config.MAX_RETRIES - 1:
+                raise
+            await asyncio.sleep(e.value)
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed for photo message {source_msg.id}: {e}")
+            if attempt == Config.MAX_RETRIES - 1:
+                return False
+            await asyncio.sleep(1)
+    
+    return False
+
 # ====================== COMMAND HANDLERS ======================
 @app.on_message(filters.command(["start", "help"]))
 async def start_cmd(client: Client, message: Message):
     help_text = """
-🚀 **Ultimate Batch Link Modifier Bot** �
+🚀 **Ultimate Batch Link Modifier Bot** 📝
 
 🔹 **Core Features:**
 - Batch process messages with ID offset
 - Smart word replacement system
 - Comprehensive media support
+- **NEW: Photo forwarding with original links**
 - Automatic retry mechanism
 
 🔹 **Basic Commands:**
 /setchat source [chat] - Set source chat
 /setchat target [chat] - Set target chat
 /batch - Start batch processing
+/photoforward - Start photo forwarding mode
 /addnumber N - Add offset N
 /lessnumber N - Subtract offset N
 /setoffset N - Set absolute offset
@@ -229,8 +281,41 @@ async def start_cmd(client: Client, message: Message):
 🔹 **System Commands:**
 /status - Show current config
 /reset - Reset all settings
+
+🔹 **Photo Forward Mode:**
+Use /photoforward to start forwarding photos with original chat links.
+Bot will ask for start and end message links, then forward only photos
+with their captions and original message links.
 """
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
+
+# NEW COMMAND: Photo Forward Mode
+@app.on_message(filters.command("photoforward"))
+async def start_photo_forward(client: Client, message: Message):
+    if Config.PROCESSING:
+        return await message.reply("⚠️ Already processing! Use /stop to cancel")
+    
+    if not Config.SOURCE_CHAT:
+        return await message.reply("❌ Source chat not set. Use /setchat source [chat_id]")
+    
+    Config.PROCESSING = True
+    Config.PHOTO_FORWARD_MODE = True
+    Config.START_ID = None
+    Config.END_ID = None
+    
+    await message.reply(
+        f"📸 **Photo Forward Mode Activated**\n"
+        f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
+        f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else 'Current Chat'}\n\n"
+        f"📝 **Instructions:**\n"
+        f"1. Reply to the FIRST message or send its link\n"
+        f"2. Bot will filter and forward only photos\n"
+        f"3. Each photo will be followed by its original chat link\n\n"
+        f"🔗 **Example output:**\n"
+        f"[Photo with caption]\n"
+        f"🔗 Original Link: https://t.me/c/123456/789",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 @app.on_message(filters.command(["addnumber", "addnum"]))
 async def add_offset(client: Client, message: Message):
@@ -334,6 +419,7 @@ async def show_status(client: Client, message: Message):
 ▫️ Replacements: {len(Config.REPLACEMENTS)}
 ▫️ Processing: {'✅ Yes' if Config.PROCESSING else '❌ No'}
 ▫️ Batch Mode: {'✅ Yes' if Config.BATCH_MODE else '❌ No'}
+▫️ Photo Forward Mode: {'✅ Yes' if Config.PHOTO_FORWARD_MODE else '❌ No'}
 ▫️ Message Filters: {sum(Config.MESSAGE_FILTERS.values())}/{len(Config.MESSAGE_FILTERS)} enabled
 """
     if Config.SOURCE_CHAT:
@@ -354,6 +440,7 @@ async def reset_config(client: Client, message: Message):
     Config.REPLACEMENTS = {}
     Config.PROCESSING = False
     Config.BATCH_MODE = False
+    Config.PHOTO_FORWARD_MODE = False
     Config.SOURCE_CHAT = None
     Config.TARGET_CHAT = None
     Config.START_ID = None
@@ -460,6 +547,7 @@ async def start_batch(client: Client, message: Message):
     
     Config.PROCESSING = True
     Config.BATCH_MODE = True
+    Config.PHOTO_FORWARD_MODE = False
     Config.START_ID = None
     Config.END_ID = None
     
@@ -476,6 +564,8 @@ async def start_batch(client: Client, message: Message):
 async def stop_cmd(client: Client, message: Message):
     if Config.PROCESSING:
         Config.PROCESSING = False
+        Config.BATCH_MODE = False
+        Config.PHOTO_FORWARD_MODE = False
         if Config.CURRENT_TASK:
             Config.CURRENT_TASK.cancel()
             Config.CURRENT_TASK = None
@@ -508,7 +598,7 @@ async def handle_message(client: Client, message: Message):
             except Exception as e:
                 return await message.reply(f"❌ Could not resolve chat: {str(e)}")
 
-        if Config.BATCH_MODE:
+        if Config.BATCH_MODE or Config.PHOTO_FORWARD_MODE:
             if Config.START_ID is None:
                 # First message of batch
                 has_perms, perm_msg = await verify_permissions(client, chat_id)
@@ -521,9 +611,11 @@ async def handle_message(client: Client, message: Message):
                     return await message.reply("❌ First message must be from the source chat")
                 
                 Config.START_ID = msg_id
+                mode_text = "Photo Forward" if Config.PHOTO_FORWARD_MODE else "Batch"
                 await message.reply(
                     f"✅ First message set: {msg_id}\n"
-                    f"Now reply to the LAST message or send its link"
+                    f"Now reply to the LAST message or send its link\n"
+                    f"Mode: {mode_text}"
                 )
             elif Config.END_ID is None:
                 # Second message of batch
@@ -536,7 +628,10 @@ async def handle_message(client: Client, message: Message):
                     return await message.reply("❌ Last message must be from the same chat as source chat")
                 
                 Config.END_ID = msg_id
-                Config.CURRENT_TASK = asyncio.create_task(process_batch(client, message))
+                if Config.PHOTO_FORWARD_MODE:
+                    Config.CURRENT_TASK = asyncio.create_task(process_photo_batch(client, message))
+                else:
+                    Config.CURRENT_TASK = asyncio.create_task(process_batch(client, message))
         else:
             # Single message processing
             try:
@@ -553,6 +648,108 @@ async def handle_message(client: Client, message: Message):
         await message.reply(f"❌ Critical error: {str(e)}")
         Config.PROCESSING = False
         Config.BATCH_MODE = False
+        Config.PHOTO_FORWARD_MODE = False
+
+async def process_photo_batch(client: Client, message: Message):
+    """Process batch of messages, filtering and forwarding only photos with original links"""
+    try:
+        if not Config.SOURCE_CHAT:
+            await message.reply("❌ Source chat not set")
+            Config.PROCESSING = False
+            return
+            
+        start_id = min(Config.START_ID, Config.END_ID)
+        end_id = max(Config.START_ID, Config.END_ID)
+        total = end_id - start_id + 1
+        
+        if total > Config.MAX_MESSAGES_PER_BATCH:
+            await message.reply(f"❌ Batch too large ({total} messages). Max allowed: {Config.MAX_MESSAGES_PER_BATCH}")
+            Config.PROCESSING = False
+            return
+            
+        target_chat = Config.TARGET_CHAT.id if Config.TARGET_CHAT else message.chat.id
+        
+        # Verify permissions
+        has_perms, perm_msg = await verify_permissions(client, Config.SOURCE_CHAT.id)
+        if not has_perms:
+            await message.reply(f"❌ Source chat permission error: {perm_msg}")
+            Config.PROCESSING = False
+            return
+            
+        has_perms, perm_msg = await verify_permissions(client, target_chat)
+        if not has_perms:
+            await message.reply(f"❌ Target chat permission error: {perm_msg}")
+            Config.PROCESSING = False
+            return
+
+        progress_msg = await message.reply(
+            f"📸 **Photo Forward Processing Started**\n"
+            f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
+            f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else message.chat.title}\n"
+            f"▫️ Range: {start_id}-{end_id}\n"
+            f"▫️ Total Messages: {total}\n"
+            f"▫️ Filter: Photos only\n",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        processed = photos_found = failed = 0
+        last_update = time.time()
+        
+        for current_id in range(start_id, end_id + 1):
+            if not Config.PROCESSING:
+                break
+            
+            try:
+                msg = await client.get_messages(Config.SOURCE_CHAT.id, current_id)
+                if msg and not msg.empty:
+                    processed += 1
+                    if msg.photo:  # Only process photos
+                        photos_found += 1
+                        success = await process_photo_with_link(client, msg, target_chat)
+                        if not success:
+                            failed += 1
+                
+                if time.time() - last_update >= 5 or current_id == end_id:
+                    progress = ((current_id - start_id) / total) * 100
+                    try:
+                        await progress_msg.edit(
+                            f"📸 **Processing Photo Batch**\n"
+                            f"▫️ Progress: {progress:.1f}%\n"
+                            f"▫️ Current: {current_id}\n"
+                            f"📝 Checked: {processed}\n"
+                            f"📸 Photos Found: {photos_found}\n"
+                            f"❌ Failed: {failed}"
+                        )
+                        last_update = time.time()
+                    except:
+                        pass
+                
+                await asyncio.sleep(Config.DELAY_BETWEEN_MESSAGES)
+            except FloodWait as e:
+                await progress_msg.edit(f"⏳ Flood wait: {e.value}s...")
+                await asyncio.sleep(e.value)
+            except Exception as e:
+                print(f"Error processing {current_id}: {e}")
+                failed += 1
+                await asyncio.sleep(1)
+        
+        if Config.PROCESSING:
+            success_photos = photos_found - failed
+            await progress_msg.edit(
+                f"✅ **Photo Forward Complete!**\n"
+                f"📝 Total Messages Checked: {processed}\n"
+                f"📸 Photos Found: {photos_found}\n"
+                f"✅ Successfully Forwarded: {success_photos}\n"
+                f"❌ Failed: {failed}\n"
+                f"📊 Success Rate: {(success_photos/photos_found)*100:.1f}%" if photos_found > 0 else "📊 No photos found"
+            )
+    
+    except Exception as e:
+        await message.reply(f"❌ Photo batch failed: {str(e)}")
+    finally:
+        Config.PROCESSING = False
+        Config.PHOTO_FORWARD_MODE = False
+        Config.CURRENT_TASK = None
 
 async def process_batch(client: Client, message: Message):
     try:
