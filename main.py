@@ -45,7 +45,7 @@ class Config:
         'contact': True
     }
     MAX_RETRIES = 3
-    DELAY_BETWEEN_MESSAGES = 0.3
+    DELAY_BETWEEN_MESSAGES = 3.0
     MAX_MESSAGES_PER_BATCH = 100000  # Updated to 100,000
 
 app = Client(
