@@ -466,7 +466,7 @@ async def show_replacements(client: Client, message: Message):
 async def add_replacement(client: Client, message: Message):
     try:
         original = message.command[1]
-        replacement = message.command[1]
+        replacement = message.command[2]  # FIXED: Was [1], should be [2]
         Config.REPLACEMENTS[original] = replacement
         await message.reply(f"✅ Added replacement: `{original}` → `{replacement}`", parse_mode=ParseMode.MARKDOWN)
     except IndexError:
