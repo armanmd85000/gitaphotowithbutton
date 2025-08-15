@@ -11,13 +11,13 @@ from pyrogram.errors import (
 )
 
 # ====================== CONFIGURATION ======================
-from config import API_ID, API_HASH, BOT_TOKEN
+from config import Config
 
-class Config:
+class GitaConfig:
     OFFSET = 0
     PROCESSING = False
     BATCH_MODE = False
-    PHOTO_FORWARD_MODE = False  # New mode for photo forwarding
+    PHOTO_FORWARD_MODE = False
     SOURCE_CHAT = None
     TARGET_CHAT = None
     START_ID = None
@@ -25,6 +25,20 @@ class Config:
     CURRENT_TASK = None
     REPLACEMENTS = {}
     ADMIN_CACHE = {}
+    # Button configuration
+    CUSTOM_BUTTONS = {
+        'enabled': True,
+        'buttons': [
+            [
+                InlineKeyboardButton("🔗 Source Link", url="https://t.me/your_channel"),
+                InlineKeyboardButton("📢 Channel", url="https://t.me/your_main_channel")
+            ],
+            [
+                InlineKeyboardButton("💡 More Info", callback_data="info"),
+                InlineKeyboardButton("⭐ Rate Us", callback_data="rate")
+            ]
+        ]
+    }
     MESSAGE_FILTERS = {
         'text': True,
         'photo': True,
@@ -40,18 +54,25 @@ class Config:
     }
     MAX_RETRIES = 3
     DELAY_BETWEEN_MESSAGES = 0.3
-    MAX_MESSAGES_PER_BATCH = 100000  # Updated to 100,000
+    MAX_MESSAGES_PER_BATCH = 100000
 
-app = Client(
-    "ultimate_batch_link_modifier",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+# Initialize bot with your existing config
+bot = Client(
+    Config.BOT_SESSION,
+    api_id=Config.API_ID,
+    api_hash=Config.API_HASH,
+    bot_token=Config.BOT_TOKEN
 )
 
 # ====================== UTILITY FUNCTIONS ======================
 def is_not_command(_, __, message: Message) -> bool:
     return not message.text.startswith('/')
+
+def create_custom_buttons() -> InlineKeyboardMarkup:
+    """Create custom inline keyboard buttons"""
+    if GitaConfig.CUSTOM_BUTTONS['enabled']:
+        return InlineKeyboardMarkup(GitaConfig.CUSTOM_BUTTONS['buttons'])
+    return None
 
 def parse_message_link(text: str) -> Optional[Tuple[Union[int, str], int]]:
     """Parse Telegram message link and return (chat_id, message_id) tuple"""
@@ -68,7 +89,6 @@ def generate_message_link(chat: object, message_id: int) -> str:
     if hasattr(chat, 'username') and chat.username:
         return f"https://t.me/{chat.username}/{message_id}"
     else:
-        # For private channels/groups, use the c/ format with chat ID
         chat_id_str = str(chat.id).replace('-100', '')
         return f"https://t.me/c/{chat_id_str}/{message_id}"
 
@@ -77,7 +97,7 @@ def modify_content(text: str, offset: int) -> str:
         return text
 
     # Apply word replacements
-    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower())):
+    for original, replacement in sorted(GitaConfig.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower())):
         text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
 
     # Modify Telegram links
@@ -98,42 +118,30 @@ async def verify_permissions(client: Client, chat_id: Union[int, str]) -> Tuple[
             chat = await client.get_chat(chat_id)
             chat_id = chat.id
 
-        if chat_id in Config.ADMIN_CACHE:
-            return Config.ADMIN_CACHE[chat_id]
+        if chat_id in GitaConfig.ADMIN_CACHE:
+            return GitaConfig.ADMIN_CACHE[chat_id]
 
         chat = await client.get_chat(chat_id)
         
         if chat.type not in [ChatType.CHANNEL, ChatType.SUPERGROUP]:
             result = (False, "Only channels and supergroups are supported")
-            Config.ADMIN_CACHE[chat_id] = result
+            GitaConfig.ADMIN_CACHE[chat_id] = result
             return result
             
         try:
             member = await client.get_chat_member(chat.id, "me")
         except UserNotParticipant:
             result = (False, "Bot is not a member of this chat")
-            Config.ADMIN_CACHE[chat_id] = result
+            GitaConfig.ADMIN_CACHE[chat_id] = result
             return result
             
         if member.status != ChatMemberStatus.ADMINISTRATOR:
             result = (False, "Bot needs to be admin")
-            Config.ADMIN_CACHE[chat_id] = result
+            GitaConfig.ADMIN_CACHE[chat_id] = result
             return result
         
-        required_perms = ["can_post_messages", "can_delete_messages"] if chat.type == ChatType.CHANNEL else ["can_send_messages"]
-        
-        if member.privileges:
-            missing_perms = [
-                perm for perm in required_perms 
-                if not getattr(member.privileges, perm, False)
-            ]
-            if missing_perms:
-                result = (False, f"Missing permissions: {', '.join(missing_perms)}")
-                Config.ADMIN_CACHE[chat_id] = result
-                return result
-        
         result = (True, "OK")
-        Config.ADMIN_CACHE[chat_id] = result
+        GitaConfig.ADMIN_CACHE[chat_id] = result
         return result
         
     except (ChannelInvalid, PeerIdInvalid):
@@ -142,15 +150,18 @@ async def verify_permissions(client: Client, chat_id: Union[int, str]) -> Tuple[
         return (False, f"Error: {str(e)}")
 
 async def process_message(client: Client, source_msg: Message, target_chat_id: int) -> bool:
-    for attempt in range(Config.MAX_RETRIES):
+    for attempt in range(GitaConfig.MAX_RETRIES):
         try:
             if source_msg.service or source_msg.empty:
                 return False
                 
+            # Create custom buttons
+            reply_markup = create_custom_buttons()
+                
             media_type = source_msg.media
-            if media_type and Config.MESSAGE_FILTERS.get(media_type.value, False):
+            if media_type and GitaConfig.MESSAGE_FILTERS.get(media_type.value, False):
                 caption = source_msg.caption or ""
-                modified_caption = modify_content(caption, Config.OFFSET)
+                modified_caption = modify_content(caption, GitaConfig.OFFSET)
                 
                 media_mapping = {
                     MessageMediaType.PHOTO: client.send_photo,
@@ -167,7 +178,8 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
                     kwargs = {
                         'chat_id': target_chat_id,
                         'caption': modified_caption if media_type != MessageMediaType.STICKER else None,
-                        'parse_mode': ParseMode.MARKDOWN
+                        'parse_mode': ParseMode.MARKDOWN,
+                        'reply_markup': reply_markup
                     }
                     kwargs[media_type.value] = getattr(source_msg, media_type.value).file_id
                     
@@ -179,27 +191,28 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
                         from_chat_id=source_msg.chat.id,
                         message_id=source_msg.id,
                         caption=modified_caption,
-                        parse_mode=ParseMode.MARKDOWN
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=reply_markup
                     )
                     return True
-            elif source_msg.text and Config.MESSAGE_FILTERS['text']:
+            elif source_msg.text and GitaConfig.MESSAGE_FILTERS['text']:
                 await client.send_message(
                     chat_id=target_chat_id,
-                    text=modify_content(source_msg.text, Config.OFFSET),
+                    text=modify_content(source_msg.text, GitaConfig.OFFSET),
                     parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=source_msg.reply_markup
+                    reply_markup=reply_markup
                 )
                 return True
                 
             return False
             
         except FloodWait as e:
-            if attempt == Config.MAX_RETRIES - 1:
+            if attempt == GitaConfig.MAX_RETRIES - 1:
                 raise
             await asyncio.sleep(e.value)
         except Exception as e:
             print(f"Attempt {attempt + 1} failed for message {source_msg.id}: {e}")
-            if attempt == Config.MAX_RETRIES - 1:
+            if attempt == GitaConfig.MAX_RETRIES - 1:
                 return False
             await asyncio.sleep(1)
     
@@ -207,50 +220,52 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
 
 async def process_photo_with_link(client: Client, source_msg: Message, target_chat_id: int) -> bool:
     """Process photo message and send with link included in caption"""
-    for attempt in range(Config.MAX_RETRIES):
+    for attempt in range(GitaConfig.MAX_RETRIES):
         try:
             if source_msg.service or source_msg.empty or not source_msg.photo:
                 return False
             
             # Get the original caption and modify it
             caption = source_msg.caption or ""
-            modified_caption = modify_content(caption, Config.OFFSET)
+            modified_caption = modify_content(caption, GitaConfig.OFFSET)
             
             # Generate the message link
             message_link = generate_message_link(source_msg.chat, source_msg.id)
             
             # Combine caption with link
             if modified_caption:
-                # If there's existing caption, add link after it
                 final_caption = f"{modified_caption}\n\n🔗 **Link:** {message_link}"
             else:
-                # If no caption, just add the link
                 final_caption = f"🔗 **Link:** {message_link}"
             
-            # Send the photo with combined caption
+            # Create custom buttons
+            reply_markup = create_custom_buttons()
+            
+            # Send the photo with combined caption and buttons
             await client.send_photo(
                 chat_id=target_chat_id,
                 photo=source_msg.photo.file_id,
                 caption=final_caption,
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup
             )
             
             return True
             
         except FloodWait as e:
-            if attempt == Config.MAX_RETRIES - 1:
+            if attempt == GitaConfig.MAX_RETRIES - 1:
                 raise
             await asyncio.sleep(e.value)
         except Exception as e:
             print(f"Attempt {attempt + 1} failed for photo message {source_msg.id}: {e}")
-            if attempt == Config.MAX_RETRIES - 1:
+            if attempt == GitaConfig.MAX_RETRIES - 1:
                 return False
             await asyncio.sleep(1)
     
     return False
 
 # ====================== COMMAND HANDLERS ======================
-@app.on_message(filters.command(["start", "help"]))
+@bot.on_message(filters.command(["gita_start", "gita_help"]))
 async def start_cmd(client: Client, message: Message):
     help_text = """
 🚀 **Ultimate Batch Link Modifier Bot** 📝
@@ -260,210 +275,309 @@ async def start_cmd(client: Client, message: Message):
 - Smart word replacement system
 - Comprehensive media support
 - **NEW: Photo forwarding with links**
+- **Custom buttons with every message**
 - Automatic retry mechanism
 
 🔹 **Basic Commands:**
-/setchat source [chat] - Set source chat
-/setchat target [chat] - Set target chat
-/batch - Start batch processing
-/photoforward - Start photo forwarding mode
-/addnumber N - Add offset N
-/lessnumber N - Subtract offset N
-/setoffset N - Set absolute offset
-/stop - Cancel current operation
+/gita_setchat source [chat] - Set source chat
+/gita_setchat target [chat] - Set target chat
+/gita_batch - Start batch processing
+/gita_photoforward - Start photo forwarding mode
+/gita_addnumber N - Add offset N
+/gita_lessnumber N - Subtract offset N
+/gita_setoffset N - Set absolute offset
+/gita_stop - Cancel current operation
+
+🔹 **Button Commands:**
+/gita_setbuttons - Configure custom buttons
+/gita_showbuttons - Show current buttons
+/gita_togglebuttons - Enable/disable buttons
 
 🔹 **Advanced Commands:**
-/replacewords - View replacements
-/addreplace ORIG REPL - Add replacement
-/removereplace WORD - Remove replacement
-/filtertypes - Show filters
-/enablefilter TYPE - Enable filter
-/disablefilter TYPE - Disable filter
+/gita_replacewords - View replacements
+/gita_addreplace ORIG REPL - Add replacement
+/gita_removereplace WORD - Remove replacement
+/gita_filtertypes - Show filters
+/gita_enablefilter TYPE - Enable filter
+/gita_disablefilter TYPE - Disable filter
 
 🔹 **System Commands:**
-/status - Show current config
-/reset - Reset all settings
-
-🔹 **Photo Forward Mode:**
-Use /photoforward to start forwarding photos with links.
-Bot will ask for start and end message links, then forward only photos
-with their captions and message links COMBINED in the caption.
+/gita_status - Show current config
+/gita_reset - Reset all settings
 
 🔹 **Batch Limit:** Up to 100,000 messages per batch
 """
     await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
 
+# Button management commands
+@bot.on_message(filters.command("gita_setbuttons"))
+async def set_buttons(client: Client, message: Message):
+    await message.reply(
+        "🔧 **Button Configuration**\n\n"
+        "Send button configuration in this format:\n"
+        "`Button Text 1|URL1||Button Text 2|URL2`\n"
+        "`Button Text 3|callback_data3||Button Text 4|callback_data4`\n\n"
+        "**Examples:**\n"
+        "`Channel|https://t.me/yourchannel||Bot|https://t.me/yourbot`\n"
+        "`Info|info_callback||Help|help_callback`\n\n"
+        "Use `||` to separate buttons in same row\n"
+        "Send each row on a new line for multiple rows\n"
+        "/gita_cancel to cancel",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    GitaConfig.PROCESSING = True
+
+@bot.on_message(filters.command("gita_showbuttons"))
+async def show_buttons(client: Client, message: Message):
+    if GitaConfig.CUSTOM_BUTTONS['enabled']:
+        button_text = "🔘 **Current Buttons:**\n\n"
+        for row_idx, row in enumerate(GitaConfig.CUSTOM_BUTTONS['buttons'], 1):
+            button_text += f"**Row {row_idx}:**\n"
+            for button in row:
+                if button.url:
+                    button_text += f"▫️ {button.text} → {button.url}\n"
+                else:
+                    button_text += f"▫️ {button.text} → callback: {button.callback_data}\n"
+            button_text += "\n"
+        button_text += f"**Status:** {'✅ Enabled' if GitaConfig.CUSTOM_BUTTONS['enabled'] else '❌ Disabled'}"
+    else:
+        button_text = "❌ **No buttons configured**"
+    
+    await message.reply(button_text, parse_mode=ParseMode.MARKDOWN)
+
+@bot.on_message(filters.command("gita_togglebuttons"))
+async def toggle_buttons(client: Client, message: Message):
+    GitaConfig.CUSTOM_BUTTONS['enabled'] = not GitaConfig.CUSTOM_BUTTONS['enabled']
+    status = "✅ Enabled" if GitaConfig.CUSTOM_BUTTONS['enabled'] else "❌ Disabled"
+    await message.reply(f"🔘 **Buttons {status}**")
+
+# Handle button configuration input
+@bot.on_message(filters.text & ~filters.command(["gita_cancel"]) & filters.create(is_not_command))
+async def handle_button_config(client: Client, message: Message):
+    if GitaConfig.PROCESSING and not GitaConfig.BATCH_MODE and not GitaConfig.PHOTO_FORWARD_MODE:
+        try:
+            # Parse button configuration
+            lines = message.text.strip().split('\n')
+            new_buttons = []
+            
+            for line in lines:
+                if not line.strip():
+                    continue
+                    
+                row_buttons = []
+                button_pairs = line.split('||')
+                
+                for pair in button_pairs:
+                    parts = pair.strip().split('|', 1)
+                    if len(parts) == 2:
+                        text, data = parts
+                        text = text.strip()
+                        data = data.strip()
+                        
+                        if data.startswith('http'):
+                            # URL button
+                            row_buttons.append(InlineKeyboardButton(text, url=data))
+                        else:
+                            # Callback button
+                            row_buttons.append(InlineKeyboardButton(text, callback_data=data))
+                
+                if row_buttons:
+                    new_buttons.append(row_buttons)
+            
+            if new_buttons:
+                GitaConfig.CUSTOM_BUTTONS['buttons'] = new_buttons
+                GitaConfig.CUSTOM_BUTTONS['enabled'] = True
+                GitaConfig.PROCESSING = False
+                
+                # Show preview
+                preview_markup = InlineKeyboardMarkup(new_buttons)
+                await message.reply(
+                    "✅ **Buttons Updated Successfully!**\n\n"
+                    "Preview of your buttons:",
+                    reply_markup=preview_markup
+                )
+            else:
+                await message.reply("❌ **Invalid button format!** Please try again.")
+        except Exception as e:
+            await message.reply(f"❌ **Error parsing buttons:** {str(e)}")
+        return
+
 # NEW COMMAND: Photo Forward Mode
-@app.on_message(filters.command("photoforward"))
+@bot.on_message(filters.command("gita_photoforward"))
 async def start_photo_forward(client: Client, message: Message):
-    if Config.PROCESSING:
-        return await message.reply("⚠️ Already processing! Use /stop to cancel")
+    if GitaConfig.PROCESSING:
+        return await message.reply("⚠️ Already processing! Use /gita_stop to cancel")
     
-    if not Config.SOURCE_CHAT:
-        return await message.reply("❌ Source chat not set. Use /setchat source [chat_id]")
+    if not GitaConfig.SOURCE_CHAT:
+        return await message.reply("❌ Source chat not set. Use /gita_setchat source [chat_id]")
     
-    Config.PROCESSING = True
-    Config.PHOTO_FORWARD_MODE = True
-    Config.START_ID = None
-    Config.END_ID = None
+    GitaConfig.PROCESSING = True
+    GitaConfig.PHOTO_FORWARD_MODE = True
+    GitaConfig.START_ID = None
+    GitaConfig.END_ID = None
     
     await message.reply(
         f"📸 **Photo Forward Mode Activated**\n"
-        f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
-        f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else 'Current Chat'}\n"
-        f"▫️ Max Batch Size: {Config.MAX_MESSAGES_PER_BATCH:,} messages\n\n"
+        f"▫️ Source: {GitaConfig.SOURCE_CHAT.title}\n"
+        f"▫️ Target: {GitaConfig.TARGET_CHAT.title if GitaConfig.TARGET_CHAT else 'Current Chat'}\n"
+        f"▫️ Buttons: {'✅ Enabled' if GitaConfig.CUSTOM_BUTTONS['enabled'] else '❌ Disabled'}\n"
+        f"▫️ Max Batch Size: {GitaConfig.MAX_MESSAGES_PER_BATCH:,} messages\n\n"
         f"📝 **Instructions:**\n"
         f"1. Reply to the FIRST message or send its link\n"
         f"2. Bot will filter and forward only photos\n"
-        f"3. Link will be included in photo caption\n\n"
+        f"3. Link will be included in photo caption\n"
+        f"4. Custom buttons will be added to each photo\n\n"
         f"🔗 **Example output:**\n"
         f"[Photo with original caption]\n\n"
-        f"🔗 Link: https://t.me/c/123456/789",
+        f"🔗 Link: https://t.me/c/123456/789\n"
+        f"[Custom Buttons Below]",
         parse_mode=ParseMode.MARKDOWN
     )
 
-@app.on_message(filters.command(["addnumber", "addnum"]))
+@bot.on_message(filters.command(["gita_addnumber", "gita_addnum"]))
 async def add_offset(client: Client, message: Message):
     try:
         offset = int(message.command[1])
-        Config.OFFSET += offset
-        await message.reply(f"✅ Offset increased by {offset}. New offset: {Config.OFFSET}")
+        GitaConfig.OFFSET += offset
+        await message.reply(f"✅ Offset increased by {offset}. New offset: {GitaConfig.OFFSET}")
     except (IndexError, ValueError):
         await message.reply("❌ Please provide a valid number to add")
 
-@app.on_message(filters.command(["lessnumber", "lessnum"]))
+@bot.on_message(filters.command(["gita_lessnumber", "gita_lessnum"]))
 async def subtract_offset(client: Client, message: Message):
     try:
         offset = int(message.command[1])
-        Config.OFFSET -= offset
-        await message.reply(f"✅ Offset decreased by {offset}. New offset: {Config.OFFSET}")
+        GitaConfig.OFFSET -= offset
+        await message.reply(f"✅ Offset decreased by {offset}. New offset: {GitaConfig.OFFSET}")
     except (IndexError, ValueError):
         await message.reply("❌ Please provide a valid number to subtract")
 
-@app.on_message(filters.command("setoffset"))
+@bot.on_message(filters.command("gita_setoffset"))
 async def set_offset(client: Client, message: Message):
     try:
         offset = int(message.command[1])
-        Config.OFFSET = offset
-        await message.reply(f"✅ Offset set to {Config.OFFSET}")
+        GitaConfig.OFFSET = offset
+        await message.reply(f"✅ Offset set to {GitaConfig.OFFSET}")
     except (IndexError, ValueError):
         await message.reply("❌ Please provide a valid offset number")
 
-@app.on_message(filters.command("replacewords"))
+@bot.on_message(filters.command("gita_replacewords"))
 async def show_replacements(client: Client, message: Message):
-    if not Config.REPLACEMENTS:
+    if not GitaConfig.REPLACEMENTS:
         await message.reply("ℹ️ No word replacements set")
         return
     
     replacements_text = "🔹 Current Word Replacements:\n"
-    for original, replacement in Config.REPLACEMENTS.items():
+    for original, replacement in GitaConfig.REPLACEMENTS.items():
         replacements_text += f"▫️ `{original}` → `{replacement}`\n"
     
     await message.reply(replacements_text, parse_mode=ParseMode.MARKDOWN)
 
-@app.on_message(filters.command("addreplace"))
+@bot.on_message(filters.command("gita_addreplace"))
 async def add_replacement(client: Client, message: Message):
     try:
         original = message.command[1]
         replacement = message.command[2]
-        Config.REPLACEMENTS[original] = replacement
+        GitaConfig.REPLACEMENTS[original] = replacement
         await message.reply(f"✅ Added replacement: `{original}` → `{replacement}`", parse_mode=ParseMode.MARKDOWN)
     except IndexError:
-        await message.reply("❌ Usage: /addreplace ORIGINAL REPLACEMENT")
+        await message.reply("❌ Usage: /gita_addreplace ORIGINAL REPLACEMENT")
 
-@app.on_message(filters.command("removereplace"))
+@bot.on_message(filters.command("gita_removereplace"))
 async def remove_replacement(client: Client, message: Message):
     try:
         word = message.command[1]
-        if word in Config.REPLACEMENTS:
-            del Config.REPLACEMENTS[word]
+        if word in GitaConfig.REPLACEMENTS:
+            del GitaConfig.REPLACEMENTS[word]
             await message.reply(f"✅ Removed replacement for `{word}`", parse_mode=ParseMode.MARKDOWN)
         else:
             await message.reply(f"❌ No replacement found for `{word}`", parse_mode=ParseMode.MARKDOWN)
     except IndexError:
         await message.reply("❌ Please specify a word to remove")
 
-@app.on_message(filters.command("filtertypes"))
+@bot.on_message(filters.command("gita_filtertypes"))
 async def show_filters(client: Client, message: Message):
     filters_text = "🔹 Current Message Filters:\n"
-    for filter_type, enabled in Config.MESSAGE_FILTERS.items():
+    for filter_type, enabled in GitaConfig.MESSAGE_FILTERS.items():
         status = "✅ Enabled" if enabled else "❌ Disabled"
         filters_text += f"▫️ {filter_type}: {status}\n"
     
     await message.reply(filters_text)
 
-@app.on_message(filters.command("enablefilter"))
+@bot.on_message(filters.command("gita_enablefilter"))
 async def enable_filter(client: Client, message: Message):
     try:
         filter_type = message.command[1].lower()
-        if filter_type in Config.MESSAGE_FILTERS:
-            Config.MESSAGE_FILTERS[filter_type] = True
+        if filter_type in GitaConfig.MESSAGE_FILTERS:
+            GitaConfig.MESSAGE_FILTERS[filter_type] = True
             await message.reply(f"✅ Enabled {filter_type} messages")
         else:
-            await message.reply(f"❌ Invalid filter type. Available types: {', '.join(Config.MESSAGE_FILTERS.keys())}")
+            await message.reply(f"❌ Invalid filter type. Available types: {', '.join(GitaConfig.MESSAGE_FILTERS.keys())}")
     except IndexError:
         await message.reply("❌ Please specify a filter type to enable")
 
-@app.on_message(filters.command("disablefilter"))
+@bot.on_message(filters.command("gita_disablefilter"))
 async def disable_filter(client: Client, message: Message):
     try:
         filter_type = message.command[1].lower()
-        if filter_type in Config.MESSAGE_FILTERS:
-            Config.MESSAGE_FILTERS[filter_type] = False
+        if filter_type in GitaConfig.MESSAGE_FILTERS:
+            GitaConfig.MESSAGE_FILTERS[filter_type] = False
             await message.reply(f"✅ Disabled {filter_type} messages")
         else:
-            await message.reply(f"❌ Invalid filter type. Available types: {', '.join(Config.MESSAGE_FILTERS.keys())}")
+            await message.reply(f"❌ Invalid filter type. Available types: {', '.join(GitaConfig.MESSAGE_FILTERS.keys())}")
     except IndexError:
         await message.reply("❌ Please specify a filter type to disable")
 
-@app.on_message(filters.command("status"))
+@bot.on_message(filters.command("gita_status"))
 async def show_status(client: Client, message: Message):
     status_text = f"""
 🔹 **Current Configuration**
-▫️ Offset: {Config.OFFSET}
-▫️ Replacements: {len(Config.REPLACEMENTS)}
-▫️ Processing: {'✅ Yes' if Config.PROCESSING else '❌ No'}
-▫️ Batch Mode: {'✅ Yes' if Config.BATCH_MODE else '❌ No'}
-▫️ Photo Forward Mode: {'✅ Yes' if Config.PHOTO_FORWARD_MODE else '❌ No'}
-▫️ Max Batch Size: {Config.MAX_MESSAGES_PER_BATCH:,} messages
-▫️ Message Filters: {sum(Config.MESSAGE_FILTERS.values())}/{len(Config.MESSAGE_FILTERS)} enabled
+▫️ Offset: {GitaConfig.OFFSET}
+▫️ Replacements: {len(GitaConfig.REPLACEMENTS)}
+▫️ Processing: {'✅ Yes' if GitaConfig.PROCESSING else '❌ No'}
+▫️ Batch Mode: {'✅ Yes' if GitaConfig.BATCH_MODE else '❌ No'}
+▫️ Photo Forward Mode: {'✅ Yes' if GitaConfig.PHOTO_FORWARD_MODE else '❌ No'}
+▫️ Custom Buttons: {'✅ Enabled' if GitaConfig.CUSTOM_BUTTONS['enabled'] else '❌ Disabled'}
+▫️ Button Rows: {len(GitaConfig.CUSTOM_BUTTONS['buttons'])}
+▫️ Max Batch Size: {GitaConfig.MAX_MESSAGES_PER_BATCH:,} messages
+▫️ Message Filters: {sum(GitaConfig.MESSAGE_FILTERS.values())}/{len(GitaConfig.MESSAGE_FILTERS)} enabled
 """
-    if Config.SOURCE_CHAT:
-        status_text += f"▫️ Source Chat: {Config.SOURCE_CHAT.title} (ID: {Config.SOURCE_CHAT.id})\n"
+    if GitaConfig.SOURCE_CHAT:
+        status_text += f"▫️ Source Chat: {GitaConfig.SOURCE_CHAT.title} (ID: {GitaConfig.SOURCE_CHAT.id})\n"
     else:
         status_text += "▫️ Source Chat: Not set\n"
     
-    if Config.TARGET_CHAT:
-        status_text += f"▫️ Target Chat: {Config.TARGET_CHAT.title} (ID: {Config.TARGET_CHAT.id})"
+    if GitaConfig.TARGET_CHAT:
+        status_text += f"▫️ Target Chat: {GitaConfig.TARGET_CHAT.title} (ID: {GitaConfig.TARGET_CHAT.id})"
     else:
         status_text += "▫️ Target Chat: Not set (will use current chat)"
     
     await message.reply(status_text, parse_mode=ParseMode.MARKDOWN)
 
-@app.on_message(filters.command("reset"))
+@bot.on_message(filters.command("gita_reset"))
 async def reset_config(client: Client, message: Message):
-    Config.OFFSET = 0
-    Config.REPLACEMENTS = {}
-    Config.PROCESSING = False
-    Config.BATCH_MODE = False
-    Config.PHOTO_FORWARD_MODE = False
-    Config.SOURCE_CHAT = None
-    Config.TARGET_CHAT = None
-    Config.START_ID = None
-    Config.END_ID = None
-    Config.MESSAGE_FILTERS = {k: True for k in Config.MESSAGE_FILTERS}
+    GitaConfig.OFFSET = 0
+    GitaConfig.REPLACEMENTS = {}
+    GitaConfig.PROCESSING = False
+    GitaConfig.BATCH_MODE = False
+    GitaConfig.PHOTO_FORWARD_MODE = False
+    GitaConfig.SOURCE_CHAT = None
+    GitaConfig.TARGET_CHAT = None
+    GitaConfig.START_ID = None
+    GitaConfig.END_ID = None
+    GitaConfig.MESSAGE_FILTERS = {k: True for k in GitaConfig.MESSAGE_FILTERS}
     
-    if Config.CURRENT_TASK:
-        Config.CURRENT_TASK.cancel()
-        Config.CURRENT_TASK = None
+    if GitaConfig.CURRENT_TASK:
+        GitaConfig.CURRENT_TASK.cancel()
+        GitaConfig.CURRENT_TASK = None
     
     await message.reply("✅ All settings have been reset to defaults")
 
-@app.on_message(filters.command(["setchat", "setgroup"]))
+@bot.on_message(filters.command(["gita_setchat", "gita_setgroup"]))
 async def set_chat(client: Client, message: Message):
     try:
         if len(message.command) < 2:
-            return await message.reply("Usage: /setchat [source|target] [chat_id or username]")
+            return await message.reply("Usage: /gita_setchat [source|target] [chat_id or username]")
         
         chat_type = message.command[1].lower()
         if chat_type not in ["source", "target"]:
@@ -485,9 +599,9 @@ async def set_chat(client: Client, message: Message):
             return await message.reply(f"Permission error: {perm_msg}")
         
         if chat_type == "source":
-            Config.SOURCE_CHAT = chat
+            GitaConfig.SOURCE_CHAT = chat
         else:
-            Config.TARGET_CHAT = chat
+            GitaConfig.TARGET_CHAT = chat
         
         await message.reply(
             f"✅ {'Source' if chat_type == 'source' else 'Target'} chat set to:\n"
@@ -498,92 +612,65 @@ async def set_chat(client: Client, message: Message):
     except Exception as e:
         await message.reply(f"Error: {str(e)}")
 
-@app.on_message(filters.command(["showchat", "showgroup"]))
-async def show_chat(client: Client, message: Message):
-    text = "🔹 Current Chat Settings:\n"
-    if Config.SOURCE_CHAT:
-        text += (
-            f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
-            f"ID: {Config.SOURCE_CHAT.id}\n"
-            f"Username: @{Config.SOURCE_CHAT.username if Config.SOURCE_CHAT.username else 'N/A'}\n\n"
-        )
-    else:
-        text += "▫️ Source: Not set\n\n"
-    
-    if Config.TARGET_CHAT:
-        text += (
-            f"▫️ Target: {Config.TARGET_CHAT.title}\n"
-            f"ID: {Config.TARGET_CHAT.id}\n"
-            f"Username: @{Config.TARGET_CHAT.username if Config.TARGET_CHAT.username else 'N/A'}\n"
-        )
-    else:
-        text += "▫️ Target: Not set (will use current chat)\n"
-    
-    await message.reply(text)
-
-@app.on_message(filters.command("clearchat"))
-async def clear_chat(client: Client, message: Message):
-    try:
-        if len(message.command) < 2:
-            return await message.reply("Usage: /clearchat [source|target|all]")
-        
-        chat_type = message.command[1].lower()
-        if chat_type == "source":
-            Config.SOURCE_CHAT = None
-            await message.reply("✅ Source chat cleared")
-        elif chat_type == "target":
-            Config.TARGET_CHAT = None
-            await message.reply("✅ Target chat cleared")
-        elif chat_type == "all":
-            Config.SOURCE_CHAT = None
-            Config.TARGET_CHAT = None
-            await message.reply("✅ Both source and target chats cleared")
-        else:
-            await message.reply("Invalid type. Use 'source', 'target' or 'all'")
-    except Exception as e:
-        await message.reply(f"Error: {str(e)}")
-
-@app.on_message(filters.command("batch"))
+@bot.on_message(filters.command("gita_batch"))
 async def start_batch(client: Client, message: Message):
-    if Config.PROCESSING:
-        return await message.reply("⚠️ Already processing! Use /stop to cancel")
+    if GitaConfig.PROCESSING:
+        return await message.reply("⚠️ Already processing! Use /gita_stop to cancel")
     
-    if not Config.SOURCE_CHAT:
-        return await message.reply("❌ Source chat not set. Use /setchat source [chat_id]")
+    if not GitaConfig.SOURCE_CHAT:
+        return await message.reply("❌ Source chat not set. Use /gita_setchat source [chat_id]")
     
-    Config.PROCESSING = True
-    Config.BATCH_MODE = True
-    Config.PHOTO_FORWARD_MODE = False
-    Config.START_ID = None
-    Config.END_ID = None
+    GitaConfig.PROCESSING = True
+    GitaConfig.BATCH_MODE = True
+    GitaConfig.PHOTO_FORWARD_MODE = False
+    GitaConfig.START_ID = None
+    GitaConfig.END_ID = None
     
     await message.reply(
         f"🔹 **Batch Mode Activated**\n"
-        f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
-        f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else 'Current Chat'}\n"
-        f"▫️ Offset: {Config.OFFSET}\n"
-        f"▫️ Replacements: {len(Config.REPLACEMENTS)}\n"
-        f"▫️ Max Batch Size: {Config.MAX_MESSAGES_PER_BATCH:,} messages\n\n"
+        f"▫️ Source: {GitaConfig.SOURCE_CHAT.title}\n"
+        f"▫️ Target: {GitaConfig.TARGET_CHAT.title if GitaConfig.TARGET_CHAT else 'Current Chat'}\n"
+        f"▫️ Offset: {GitaConfig.OFFSET}\n"
+        f"▫️ Replacements: {len(GitaConfig.REPLACEMENTS)}\n"
+        f"▫️ Buttons: {'✅ Enabled' if GitaConfig.CUSTOM_BUTTONS['enabled'] else '❌ Disabled'}\n"
+        f"▫️ Max Batch Size: {GitaConfig.MAX_MESSAGES_PER_BATCH:,} messages\n\n"
         f"Reply to the FIRST message or send its link"
     )
 
-@app.on_message(filters.command(["stop", "cancel"]))
+@bot.on_message(filters.command(["gita_stop", "gita_cancel"]))
 async def stop_cmd(client: Client, message: Message):
-    if Config.PROCESSING:
-        Config.PROCESSING = False
-        Config.BATCH_MODE = False
-        Config.PHOTO_FORWARD_MODE = False
-        if Config.CURRENT_TASK:
-            Config.CURRENT_TASK.cancel()
-            Config.CURRENT_TASK = None
+    if GitaConfig.PROCESSING:
+        GitaConfig.PROCESSING = False
+        GitaConfig.BATCH_MODE = False
+        GitaConfig.PHOTO_FORWARD_MODE = False
+        if GitaConfig.CURRENT_TASK:
+            GitaConfig.CURRENT_TASK.cancel()
+            GitaConfig.CURRENT_TASK = None
         await message.reply("✅ Processing stopped")
     else:
         await message.reply("⚠️ No active process")
 
-@app.on_message(filters.text & filters.create(is_not_command))
+# Handle callback queries for custom buttons
+@bot.on_callback_query()
+async def handle_callbacks(client: Client, callback_query):
+    data = callback_query.data
+    
+    if data == "info":
+        await callback_query.answer("ℹ️ This is an info button!")
+    elif data == "rate":
+        await callback_query.answer("⭐ Thanks for rating us!")
+    else:
+        await callback_query.answer(f"Button pressed: {data}")
+
+# Main message handler for batch processing
+@bot.on_message(filters.text & filters.create(is_not_command))
 async def handle_message(client: Client, message: Message):
-    if not Config.PROCESSING:
+    if not GitaConfig.PROCESSING:
         return
+    
+    # Skip if this is button configuration mode
+    if GitaConfig.PROCESSING and not GitaConfig.BATCH_MODE and not GitaConfig.PHOTO_FORWARD_MODE:
+        return  # This will be handled by button config handler
     
     try:
         # Get source message details
@@ -598,53 +685,47 @@ async def handle_message(client: Client, message: Message):
             
             chat_identifier, msg_id = link_info
             
-            # Resolve the chat properly
             try:
                 chat = await client.get_chat(chat_identifier)
                 chat_id = chat.id
             except Exception as e:
                 return await message.reply(f"❌ Could not resolve chat: {str(e)}")
 
-        if Config.BATCH_MODE or Config.PHOTO_FORWARD_MODE:
-            if Config.START_ID is None:
-                # First message of batch
+        if GitaConfig.BATCH_MODE or GitaConfig.PHOTO_FORWARD_MODE:
+            if GitaConfig.START_ID is None:
                 has_perms, perm_msg = await verify_permissions(client, chat_id)
                 if not has_perms:
-                    Config.PROCESSING = False
+                    GitaConfig.PROCESSING = False
                     return await message.reply(f"❌ Permission error: {perm_msg}")
                 
-                # Verify this is same chat as source chat
-                if Config.SOURCE_CHAT and chat_id != Config.SOURCE_CHAT.id:
+                if GitaConfig.SOURCE_CHAT and chat_id != GitaConfig.SOURCE_CHAT.id:
                     return await message.reply("❌ First message must be from the source chat")
                 
-                Config.START_ID = msg_id
-                mode_text = "Photo Forward" if Config.PHOTO_FORWARD_MODE else "Batch"
+                GitaConfig.START_ID = msg_id
+                mode_text = "Photo Forward" if GitaConfig.PHOTO_FORWARD_MODE else "Batch"
                 await message.reply(
                     f"✅ First message set: {msg_id}\n"
                     f"Now reply to the LAST message or send its link\n"
                     f"Mode: {mode_text}"
                 )
-            elif Config.END_ID is None:
-                # Second message of batch
-                if not Config.SOURCE_CHAT:
-                    Config.PROCESSING = False
+            elif GitaConfig.END_ID is None:
+                if not GitaConfig.SOURCE_CHAT:
+                    GitaConfig.PROCESSING = False
                     return await message.reply("❌ Source chat not set")
                 
-                # Verify same chat as source
-                if chat_id != Config.SOURCE_CHAT.id:
+                if chat_id != GitaConfig.SOURCE_CHAT.id:
                     return await message.reply("❌ Last message must be from the same chat as source chat")
                 
-                Config.END_ID = msg_id
-                if Config.PHOTO_FORWARD_MODE:
-                    Config.CURRENT_TASK = asyncio.create_task(process_photo_batch(client, message))
+                GitaConfig.END_ID = msg_id
+                if GitaConfig.PHOTO_FORWARD_MODE:
+                    GitaConfig.CURRENT_TASK = asyncio.create_task(process_photo_batch(client, message))
                 else:
-                    Config.CURRENT_TASK = asyncio.create_task(process_batch(client, message))
+                    GitaConfig.CURRENT_TASK = asyncio.create_task(process_batch(client, message))
         else:
-            # Single message processing
             try:
                 msg = await client.get_messages(chat_id, msg_id)
                 if msg and not msg.empty:
-                    target_chat = Config.TARGET_CHAT.id if Config.TARGET_CHAT else message.chat.id
+                    target_chat = GitaConfig.TARGET_CHAT.id if GitaConfig.TARGET_CHAT else message.chat.id
                     success = await process_message(client, msg, target_chat)
                     if not success:
                         await message.reply("⚠️ Failed to process this message")
@@ -653,48 +734,49 @@ async def handle_message(client: Client, message: Message):
             
     except Exception as e:
         await message.reply(f"❌ Critical error: {str(e)}")
-        Config.PROCESSING = False
-        Config.BATCH_MODE = False
-        Config.PHOTO_FORWARD_MODE = False
+        GitaConfig.PROCESSING = False
+        GitaConfig.BATCH_MODE = False
+        GitaConfig.PHOTO_FORWARD_MODE = False
 
 async def process_photo_batch(client: Client, message: Message):
     """Process batch of messages, filtering and forwarding only photos with links"""
     try:
-        if not Config.SOURCE_CHAT:
+        if not GitaConfig.SOURCE_CHAT:
             await message.reply("❌ Source chat not set")
-            Config.PROCESSING = False
+            GitaConfig.PROCESSING = False
             return
             
-        start_id = min(Config.START_ID, Config.END_ID)
-        end_id = max(Config.START_ID, Config.END_ID)
+        start_id = min(GitaConfig.START_ID, GitaConfig.END_ID)
+        end_id = max(GitaConfig.START_ID, GitaConfig.END_ID)
         total = end_id - start_id + 1
         
-        if total > Config.MAX_MESSAGES_PER_BATCH:
-            await message.reply(f"❌ Batch too large ({total:,} messages). Max allowed: {Config.MAX_MESSAGES_PER_BATCH:,}")
-            Config.PROCESSING = False
+        if total > GitaConfig.MAX_MESSAGES_PER_BATCH:
+            await message.reply(f"❌ Batch too large ({total:,} messages). Max allowed: {GitaConfig.MAX_MESSAGES_PER_BATCH:,}")
+            GitaConfig.PROCESSING = False
             return
             
-        target_chat = Config.TARGET_CHAT.id if Config.TARGET_CHAT else message.chat.id
+        target_chat = GitaConfig.TARGET_CHAT.id if GitaConfig.TARGET_CHAT else message.chat.id
         
         # Verify permissions
-        has_perms, perm_msg = await verify_permissions(client, Config.SOURCE_CHAT.id)
+        has_perms, perm_msg = await verify_permissions(client, GitaConfig.SOURCE_CHAT.id)
         if not has_perms:
             await message.reply(f"❌ Source chat permission error: {perm_msg}")
-            Config.PROCESSING = False
+            GitaConfig.PROCESSING = False
             return
             
         has_perms, perm_msg = await verify_permissions(client, target_chat)
         if not has_perms:
             await message.reply(f"❌ Target chat permission error: {perm_msg}")
-            Config.PROCESSING = False
+            GitaConfig.PROCESSING = False
             return
 
         progress_msg = await message.reply(
             f"📸 **Photo Forward Processing Started**\n"
-            f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
-            f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else message.chat.title}\n"
+            f"▫️ Source: {GitaConfig.SOURCE_CHAT.title}\n"
+            f"▫️ Target: {GitaConfig.TARGET_CHAT.title if GitaConfig.TARGET_CHAT else message.chat.title}\n"
             f"▫️ Range: {start_id:,}-{end_id:,}\n"
             f"▫️ Total Messages: {total:,}\n"
+            f"▫️ Buttons: {'✅ Enabled' if GitaConfig.CUSTOM_BUTTONS['enabled'] else '❌ Disabled'}\n"
             f"▫️ Filter: Photos only with links in caption\n",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -703,14 +785,14 @@ async def process_photo_batch(client: Client, message: Message):
         last_update = time.time()
         
         for current_id in range(start_id, end_id + 1):
-            if not Config.PROCESSING:
+            if not GitaConfig.PROCESSING:
                 break
             
             try:
-                msg = await client.get_messages(Config.SOURCE_CHAT.id, current_id)
+                msg = await client.get_messages(GitaConfig.SOURCE_CHAT.id, current_id)
                 if msg and not msg.empty:
                     processed += 1
-                    if msg.photo:  # Only process photos
+                    if msg.photo:
                         photos_found += 1
                         success = await process_photo_with_link(client, msg, target_chat)
                         if not success:
@@ -731,7 +813,7 @@ async def process_photo_batch(client: Client, message: Message):
                     except:
                         pass
                 
-                await asyncio.sleep(Config.DELAY_BETWEEN_MESSAGES)
+                await asyncio.sleep(GitaConfig.DELAY_BETWEEN_MESSAGES)
             except FloodWait as e:
                 await progress_msg.edit(f"⏳ Flood wait: {e.value}s...")
                 await asyncio.sleep(e.value)
@@ -740,7 +822,7 @@ async def process_photo_batch(client: Client, message: Message):
                 failed += 1
                 await asyncio.sleep(1)
         
-        if Config.PROCESSING:
+        if GitaConfig.PROCESSING:
             success_photos = photos_found - failed
             await progress_msg.edit(
                 f"✅ **Photo Forward Complete!**\n"
@@ -754,48 +836,49 @@ async def process_photo_batch(client: Client, message: Message):
     except Exception as e:
         await message.reply(f"❌ Photo batch failed: {str(e)}")
     finally:
-        Config.PROCESSING = False
-        Config.PHOTO_FORWARD_MODE = False
-        Config.CURRENT_TASK = None
+        GitaConfig.PROCESSING = False
+        GitaConfig.PHOTO_FORWARD_MODE = False
+        GitaConfig.CURRENT_TASK = None
 
 async def process_batch(client: Client, message: Message):
     try:
-        if not Config.SOURCE_CHAT:
+        if not GitaConfig.SOURCE_CHAT:
             await message.reply("❌ Source chat not set")
-            Config.PROCESSING = False
+            GitaConfig.PROCESSING = False
             return
             
-        start_id = min(Config.START_ID, Config.END_ID)
-        end_id = max(Config.START_ID, Config.END_ID)
+        start_id = min(GitaConfig.START_ID, GitaConfig.END_ID)
+        end_id = max(GitaConfig.START_ID, GitaConfig.END_ID)
         total = end_id - start_id + 1
         
-        if total > Config.MAX_MESSAGES_PER_BATCH:
-            await message.reply(f"❌ Batch too large ({total:,} messages). Max allowed: {Config.MAX_MESSAGES_PER_BATCH:,}")
-            Config.PROCESSING = False
+        if total > GitaConfig.MAX_MESSAGES_PER_BATCH:
+            await message.reply(f"❌ Batch too large ({total:,} messages). Max allowed: {GitaConfig.MAX_MESSAGES_PER_BATCH:,}")
+            GitaConfig.PROCESSING = False
             return
             
-        target_chat = Config.TARGET_CHAT.id if Config.TARGET_CHAT else message.chat.id
+        target_chat = GitaConfig.TARGET_CHAT.id if GitaConfig.TARGET_CHAT else message.chat.id
         
         # Verify permissions
-        has_perms, perm_msg = await verify_permissions(client, Config.SOURCE_CHAT.id)
+        has_perms, perm_msg = await verify_permissions(client, GitaConfig.SOURCE_CHAT.id)
         if not has_perms:
             await message.reply(f"❌ Source chat permission error: {perm_msg}")
-            Config.PROCESSING = False
+            GitaConfig.PROCESSING = False
             return
             
         has_perms, perm_msg = await verify_permissions(client, target_chat)
         if not has_perms:
             await message.reply(f"❌ Target chat permission error: {perm_msg}")
-            Config.PROCESSING = False
+            GitaConfig.PROCESSING = False
             return
 
         progress_msg = await message.reply(
             f"⚡ **Batch Processing Started**\n"
-            f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
-            f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else message.chat.title}\n"
+            f"▫️ Source: {GitaConfig.SOURCE_CHAT.title}\n"
+            f"▫️ Target: {GitaConfig.TARGET_CHAT.title if GitaConfig.TARGET_CHAT else message.chat.title}\n"
             f"▫️ Range: {start_id:,}-{end_id:,}\n"
             f"▫️ Total: {total:,} messages\n"
-            f"▫️ Offset: {Config.OFFSET}\n",
+            f"▫️ Buttons: {'✅ Enabled' if GitaConfig.CUSTOM_BUTTONS['enabled'] else '❌ Disabled'}\n"
+            f"▫️ Offset: {GitaConfig.OFFSET}\n",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -803,11 +886,11 @@ async def process_batch(client: Client, message: Message):
         last_update = time.time()
         
         for current_id in range(start_id, end_id + 1):
-            if not Config.PROCESSING:
+            if not GitaConfig.PROCESSING:
                 break
             
             try:
-                msg = await client.get_messages(Config.SOURCE_CHAT.id, current_id)
+                msg = await client.get_messages(GitaConfig.SOURCE_CHAT.id, current_id)
                 if msg and not msg.empty:
                     success = await process_message(client, msg, target_chat)
                     if success:
@@ -831,7 +914,7 @@ async def process_batch(client: Client, message: Message):
                     except:
                         pass
                 
-                await asyncio.sleep(Config.DELAY_BETWEEN_MESSAGES)
+                await asyncio.sleep(GitaConfig.DELAY_BETWEEN_MESSAGES)
             except FloodWait as e:
                 await progress_msg.edit(f"⏳ Flood wait: {e.value}s...")
                 await asyncio.sleep(e.value)
@@ -840,7 +923,7 @@ async def process_batch(client: Client, message: Message):
                 failed += 1
                 await asyncio.sleep(1)
         
-        if Config.PROCESSING:
+        if GitaConfig.PROCESSING:
             await progress_msg.edit(
                 f"✅ **Batch Complete!**\n"
                 f"▫️ Total: {total:,}\n"
@@ -852,15 +935,16 @@ async def process_batch(client: Client, message: Message):
     except Exception as e:
         await message.reply(f"❌ Batch failed: {str(e)}")
     finally:
-        Config.PROCESSING = False
-        Config.BATCH_MODE = False
-        Config.CURRENT_TASK = None
+        GitaConfig.PROCESSING = False
+        GitaConfig.BATCH_MODE = False
+        GitaConfig.CURRENT_TASK = None
 
 if __name__ == "__main__":
-    print("⚡ Ultimate Batch Link Modifier Bot Started!")
-    print(f"📊 Max Batch Size: {Config.MAX_MESSAGES_PER_BATCH:,} messages")
+    print("⚡ Ultimate Batch Link Modifier Bot with Custom Buttons Started!")
+    print(f"📊 Max Batch Size: {GitaConfig.MAX_MESSAGES_PER_BATCH:,} messages")
+    print(f"🔘 Custom Buttons: {'✅ Enabled' if GitaConfig.CUSTOM_BUTTONS['enabled'] else '❌ Disabled'}")
     try:
-        app.start()
+        bot.start()
         print("✅ Bot started successfully!")
         idle()
     except KeyboardInterrupt:
@@ -869,7 +953,7 @@ if __name__ == "__main__":
         print(f"❌ Fatal error: {e}")
     finally:
         try:
-            app.stop()
+            bot.stop()
             print("✅ Bot stopped gracefully")
         except:
             print("⚠️ Bot was already stopped")
