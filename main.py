@@ -10,14 +10,14 @@ from pyrogram.errors import (
     ChatAdminRequired, PeerIdInvalid, UserNotParticipant, BadRequest
 )
 
-# ====================== CONFIGURATION ======================
+# ==== CONFIGURATION ========
 from config import API_ID, API_HASH, BOT_TOKEN
 
 class Config:
     OFFSET = 0
     PROCESSING = False
     BATCH_MODE = False
-    PHOTO_FORWARD_MODE = False  # New mode for photo forwarding
+    PHOTO_FORWARD_MODE = False
     SOURCE_CHAT = None
     TARGET_CHAT = None
     START_ID = None
@@ -26,10 +26,11 @@ class Config:
     REPLACEMENTS = {}
     ADMIN_CACHE = {}
     
-    # Button configuration
-    CUSTOM_BUTTONS_ENABLED = True
-    CUSTOM_BUTTON_TEXT = "The Skill Wallah"
-    CUSTOM_BUTTON_URL = "https://skillswallah.bio.link/"
+    # NEW: Button configuration
+    BUTTONS_ENABLED = False
+    CUSTOM_BUTTON_TEXT = "View Original"
+    CUSTOM_BUTTON_URL = None
+    BUTTON_TYPE = "custom"  # "custom" or "original_link"
     
     MESSAGE_FILTERS = {
         'text': True,
@@ -45,8 +46,8 @@ class Config:
         'contact': True
     }
     MAX_RETRIES = 3
-    DELAY_BETWEEN_MESSAGES = 3.0
-    MAX_MESSAGES_PER_BATCH = 100000  # Updated to 100,000
+    DELAY_BETWEEN_MESSAGES = 0.3
+    MAX_MESSAGES_PER_BATCH = 100000
 
 app = Client(
     "ultimate_batch_link_modifier",
@@ -55,17 +56,9 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-# ====================== UTILITY FUNCTIONS ======================
+# ==== UTILITY FUNCTIONS ========
 def is_not_command(_, __, message: Message) -> bool:
     return not message.text.startswith('/')
-
-def create_inline_button() -> InlineKeyboardMarkup:
-    """Create inline keyboard button for messages"""
-    if Config.CUSTOM_BUTTONS_ENABLED:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton(Config.CUSTOM_BUTTON_TEXT, url=Config.CUSTOM_BUTTON_URL)]
-        ])
-    return None
 
 def parse_message_link(text: str) -> Optional[Tuple[Union[int, str], int]]:
     """Parse Telegram message link and return (chat_id, message_id) tuple"""
@@ -86,14 +79,31 @@ def generate_message_link(chat: object, message_id: int) -> str:
         chat_id_str = str(chat.id).replace('-100', '')
         return f"https://t.me/c/{chat_id_str}/{message_id}"
 
+def create_inline_keyboard(source_msg: Message) -> Optional[InlineKeyboardMarkup]:
+    """Create inline keyboard based on configuration"""
+    if not Config.BUTTONS_ENABLED:
+        return None
+    
+    buttons = []
+    
+    if Config.BUTTON_TYPE == "original_link":
+        # Create button with link to original message
+        original_link = generate_message_link(source_msg.chat, source_msg.id)
+        buttons.append([InlineKeyboardButton(Config.CUSTOM_BUTTON_TEXT, url=original_link)])
+    elif Config.BUTTON_TYPE == "custom" and Config.CUSTOM_BUTTON_URL:
+        # Create button with custom URL
+        buttons.append([InlineKeyboardButton(Config.CUSTOM_BUTTON_TEXT, url=Config.CUSTOM_BUTTON_URL)])
+    
+    return InlineKeyboardMarkup(buttons) if buttons else None
+
 def modify_content(text: str, offset: int) -> str:
     if not text:
         return text
-
+    
     # Apply word replacements
     for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x.lower())):
         text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
-
+    
     # Modify Telegram links
     def replacer(match):
         prefix = match.group(1) or ""
@@ -102,7 +112,7 @@ def modify_content(text: str, offset: int) -> str:
         chat_id = match.group(4)
         post_id = match.group(5)
         return f"{prefix}{domain}/{chat_part}{chat_id}/{int(post_id) + offset}"
-
+    
     pattern = r'(https?://)?(t\.me|telegram\.(?:me|dog))/(c/)?([^/\s]+)/(\d+)'
     return re.sub(pattern, replacer, text)
 
@@ -160,10 +170,10 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
         try:
             if source_msg.service or source_msg.empty:
                 return False
-                
-            # Create inline button
-            reply_markup = create_inline_button()
-                
+            
+            # Create inline keyboard if enabled
+            keyboard = create_inline_keyboard(source_msg)
+            
             media_type = source_msg.media
             if media_type and Config.MESSAGE_FILTERS.get(media_type.value, False):
                 caption = source_msg.caption or ""
@@ -185,7 +195,7 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
                         'chat_id': target_chat_id,
                         'caption': modified_caption if media_type != MessageMediaType.STICKER else None,
                         'parse_mode': ParseMode.MARKDOWN,
-                        'reply_markup': reply_markup
+                        'reply_markup': keyboard
                     }
                     kwargs[media_type.value] = getattr(source_msg, media_type.value).file_id
                     
@@ -198,15 +208,24 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
                         message_id=source_msg.id,
                         caption=modified_caption,
                         parse_mode=ParseMode.MARKDOWN,
-                        reply_markup=reply_markup
+                        reply_markup=keyboard
                     )
                     return True
             elif source_msg.text and Config.MESSAGE_FILTERS['text']:
+                # Combine original reply markup with our custom keyboard
+                final_keyboard = keyboard
+                if source_msg.reply_markup and keyboard:
+                    # If both exist, prioritize our custom keyboard
+                    final_keyboard = keyboard
+                elif source_msg.reply_markup and not keyboard:
+                    # Use original if no custom keyboard
+                    final_keyboard = source_msg.reply_markup
+                
                 await client.send_message(
                     chat_id=target_chat_id,
                     text=modify_content(source_msg.text, Config.OFFSET),
                     parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=reply_markup
+                    reply_markup=final_keyboard
                 )
                 return True
                 
@@ -240,22 +259,20 @@ async def process_photo_with_link(client: Client, source_msg: Message, target_ch
             
             # Combine caption with link
             if modified_caption:
-                # If there's existing caption, add link after it
-                final_caption = f"{modified_caption}\n\n🔗 **Link:** {message_link}"
+                final_caption = f"{modified_caption}\n\n🔗 Link: {message_link}"
             else:
-                # If no caption, just add the link
-                final_caption = f"🔗 **Link:** {message_link}"
+                final_caption = f"🔗 Link: {message_link}"
             
-            # Create inline button
-            reply_markup = create_inline_button()
+            # Create inline keyboard if enabled
+            keyboard = create_inline_keyboard(source_msg)
             
-            # Send the photo with combined caption and button
+            # Send the photo with combined caption and keyboard
             await client.send_photo(
                 chat_id=target_chat_id,
                 photo=source_msg.photo.file_id,
                 caption=final_caption,
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=reply_markup
+                reply_markup=keyboard
             )
             
             return True
@@ -272,7 +289,7 @@ async def process_photo_with_link(client: Client, source_msg: Message, target_ch
     
     return False
 
-# ====================== COMMAND HANDLERS ======================
+# ==== COMMAND HANDLERS ========
 @app.on_message(filters.command(["start", "help"]))
 async def start_cmd(client: Client, message: Message):
     help_text = """
@@ -282,7 +299,7 @@ async def start_cmd(client: Client, message: Message):
 - Batch process messages with ID offset
 - Smart word replacement system
 - Comprehensive media support
-- **NEW: Photo forwarding with links**
+- Photo forwarding with links
 - **Custom inline buttons with every message**
 - Automatic retry mechanism
 
@@ -320,76 +337,84 @@ with their captions and message links COMBINED in the caption.
 
 🔹 **Batch Limit:** Up to 100,000 messages per batch
 """
-    
-    # Show current button as example
-    button_markup = create_inline_button()
-    await message.reply(help_text, parse_mode=ParseMode.MARKDOWN, reply_markup=button_markup)
+    await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
 
-# Button management commands
+# NEW: Button Commands
 @app.on_message(filters.command("buttoninfo"))
 async def button_info(client: Client, message: Message):
-    status = "✅ Enabled" if Config.CUSTOM_BUTTONS_ENABLED else "❌ Disabled"
+    status = "✅ Enabled" if Config.BUTTONS_ENABLED else "❌ Disabled"
+    button_type_text = {
+        "custom": "Custom URL",
+        "original_link": "Original Message Link"
+    }.get(Config.BUTTON_TYPE, "Unknown")
+    
     info_text = f"""
-🔘 **Button Configuration:**
+🔹 **Button Configuration**
 ▫️ Status: {status}
-▫️ Text: `{Config.CUSTOM_BUTTON_TEXT}`
-▫️ URL: `{Config.CUSTOM_BUTTON_URL}`
+▫️ Type: {button_type_text}
+▫️ Button Text: `{Config.CUSTOM_BUTTON_TEXT}`
+▫️ Custom URL: `{Config.CUSTOM_BUTTON_URL or 'Not set'}`
 
-This button will be added to every forwarded message.
+**Usage:**
+- When enabled, buttons are added to all forwarded messages
+- `original_link` creates buttons linking to source message
+- `custom` uses your specified URL for all buttons
 """
-    button_markup = create_inline_button() if Config.CUSTOM_BUTTONS_ENABLED else None
-    await message.reply(info_text, parse_mode=ParseMode.MARKDOWN, reply_markup=button_markup)
+    await message.reply(info_text, parse_mode=ParseMode.MARKDOWN)
 
 @app.on_message(filters.command("togglebutton"))
 async def toggle_button(client: Client, message: Message):
-    Config.CUSTOM_BUTTONS_ENABLED = not Config.CUSTOM_BUTTONS_ENABLED
-    status = "✅ Enabled" if Config.CUSTOM_BUTTONS_ENABLED else "❌ Disabled"
-    await message.reply(f"🔘 **Inline buttons {status}**")
+    Config.BUTTONS_ENABLED = not Config.BUTTONS_ENABLED
+    status = "enabled" if Config.BUTTONS_ENABLED else "disabled"
+    await message.reply(f"✅ Inline buttons {status}")
 
 @app.on_message(filters.command("setbutton"))
 async def set_button(client: Client, message: Message):
     try:
-        if len(message.command) < 3:
-            return await message.reply("❌ Usage: /setbutton [text] [url]\nExample: /setbutton \"My Channel\" \"https://t.me/mychannel\"")
+        parts = message.text.split(None, 2)  # Split into max 3 parts
         
-        # Join all parts except the last one as button text, last part as URL
-        parts = message.text.split(' ', 2)[1:]  # Remove command
-        if len(parts) >= 2:
-            # Split by last space to separate text and URL
-            full_text = parts[1] if len(parts) == 2 else ' '.join(parts)
-            text_parts = full_text.rsplit(' ', 1)
-            
-            if len(text_parts) == 2:
-                button_text, button_url = text_parts
-                button_text = button_text.strip('"').strip("'")  # Remove quotes if present
-                
-                # Validate URL
-                if not button_url.startswith(('http://', 'https://')):
-                    return await message.reply("❌ URL must start with http:// or https://")
-                
-                Config.CUSTOM_BUTTON_TEXT = button_text
-                Config.CUSTOM_BUTTON_URL = button_url
-                Config.CUSTOM_BUTTONS_ENABLED = True
-                
-                # Show preview
-                preview_markup = create_inline_button()
-                await message.reply(
-                    f"✅ **Button updated successfully!**\n"
-                    f"▫️ Text: `{Config.CUSTOM_BUTTON_TEXT}`\n"
-                    f"▫️ URL: `{Config.CUSTOM_BUTTON_URL}`\n\n"
-                    f"Preview:",
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=preview_markup
-                )
-            else:
-                await message.reply("❌ Invalid format. Use: /setbutton [text] [url]")
+        if len(parts) < 3:
+            return await message.reply(
+                "❌ Usage: `/setbutton [text] [url]`\n"
+                "Example: `/setbutton View Original https://example.com`\n\n"
+                "Use `/setbutton original` to use original message links"
+            )
+        
+        button_text = parts[1]
+        button_url = parts
+        
+        if button_url.lower() == "original":
+            Config.BUTTON_TYPE = "original_link"
+            Config.CUSTOM_BUTTON_TEXT = button_text
+            await message.reply(
+                f"✅ Button set to use original message links\n"
+                f"Text: `{button_text}`"
+            )
         else:
-            await message.reply("❌ Please provide both button text and URL")
+            # Validate URL format
+            if not (button_url.startswith('http://') or button_url.startswith('https://')):
+                return await message.reply("❌ URL must start with http:// or https://")
+            
+            Config.BUTTON_TYPE = "custom"
+            Config.CUSTOM_BUTTON_TEXT = button_text
+            Config.CUSTOM_BUTTON_URL = button_url
+            
+            await message.reply(
+                f"✅ Custom button set\n"
+                f"Text: `{button_text}`\n"
+                f"URL: `{button_url}`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        # Auto-enable buttons if they were disabled
+        if not Config.BUTTONS_ENABLED:
+            Config.BUTTONS_ENABLED = True
+            await message.reply("ℹ️ Buttons automatically enabled")
             
     except Exception as e:
         await message.reply(f"❌ Error setting button: {str(e)}")
 
-# NEW COMMAND: Photo Forward Mode
+# All other existing commands remain the same...
 @app.on_message(filters.command("photoforward"))
 async def start_photo_forward(client: Client, message: Message):
     if Config.PROCESSING:
@@ -403,7 +428,7 @@ async def start_photo_forward(client: Client, message: Message):
     Config.START_ID = None
     Config.END_ID = None
     
-    button_status = "✅ Enabled" if Config.CUSTOM_BUTTONS_ENABLED else "❌ Disabled"
+    button_status = "✅ Enabled" if Config.BUTTONS_ENABLED else "❌ Disabled"
     
     await message.reply(
         f"📸 **Photo Forward Mode Activated**\n"
@@ -415,11 +440,10 @@ async def start_photo_forward(client: Client, message: Message):
         f"1. Reply to the FIRST message or send its link\n"
         f"2. Bot will filter and forward only photos\n"
         f"3. Link will be included in photo caption\n"
-        f"4. Custom button will be added below each photo\n\n"
+        f"4. Custom buttons will be added if enabled\n\n"
         f"🔗 **Example output:**\n"
         f"[Photo with original caption]\n\n"
-        f"🔗 Link: https://t.me/c/123456/789\n"
-        f"[{Config.CUSTOM_BUTTON_TEXT} Button]",
+        f"🔗 Link: https://t.me/c/123456/789",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -458,7 +482,7 @@ async def show_replacements(client: Client, message: Message):
     
     replacements_text = "🔹 Current Word Replacements:\n"
     for original, replacement in Config.REPLACEMENTS.items():
-        replacements_text += f"▫️ `{original}` → `{replacement}`\n"
+        replacements_text += f"▫️ {original} → `{replacement}`\n"
     
     await message.reply(replacements_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -466,9 +490,9 @@ async def show_replacements(client: Client, message: Message):
 async def add_replacement(client: Client, message: Message):
     try:
         original = message.command[1]
-        replacement = message.command[2]  # FIXED: Was [1], should be [2]
+        replacement = message.command
         Config.REPLACEMENTS[original] = replacement
-        await message.reply(f"✅ Added replacement: `{original}` → `{replacement}`", parse_mode=ParseMode.MARKDOWN)
+        await message.reply(f"✅ Added replacement: {original} → {replacement}", parse_mode=ParseMode.MARKDOWN)
     except IndexError:
         await message.reply("❌ Usage: /addreplace ORIGINAL REPLACEMENT")
 
@@ -478,9 +502,9 @@ async def remove_replacement(client: Client, message: Message):
         word = message.command[1]
         if word in Config.REPLACEMENTS:
             del Config.REPLACEMENTS[word]
-            await message.reply(f"✅ Removed replacement for `{word}`", parse_mode=ParseMode.MARKDOWN)
+            await message.reply(f"✅ Removed replacement for {word}", parse_mode=ParseMode.MARKDOWN)
         else:
-            await message.reply(f"❌ No replacement found for `{word}`", parse_mode=ParseMode.MARKDOWN)
+            await message.reply(f"❌ No replacement found for {word}", parse_mode=ParseMode.MARKDOWN)
     except IndexError:
         await message.reply("❌ Please specify a word to remove")
 
@@ -519,7 +543,7 @@ async def disable_filter(client: Client, message: Message):
 
 @app.on_message(filters.command("status"))
 async def show_status(client: Client, message: Message):
-    button_status = "✅ Enabled" if Config.CUSTOM_BUTTONS_ENABLED else "❌ Disabled"
+    button_status = "✅ Enabled" if Config.BUTTONS_ENABLED else "❌ Disabled"
     
     status_text = f"""
 🔹 **Current Configuration**
@@ -529,7 +553,6 @@ async def show_status(client: Client, message: Message):
 ▫️ Batch Mode: {'✅ Yes' if Config.BATCH_MODE else '❌ No'}
 ▫️ Photo Forward Mode: {'✅ Yes' if Config.PHOTO_FORWARD_MODE else '❌ No'}
 ▫️ Inline Buttons: {button_status}
-▫️ Button Text: `{Config.CUSTOM_BUTTON_TEXT}`
 ▫️ Max Batch Size: {Config.MAX_MESSAGES_PER_BATCH:,} messages
 ▫️ Message Filters: {sum(Config.MESSAGE_FILTERS.values())}/{len(Config.MESSAGE_FILTERS)} enabled
 """
@@ -556,12 +579,11 @@ async def reset_config(client: Client, message: Message):
     Config.TARGET_CHAT = None
     Config.START_ID = None
     Config.END_ID = None
+    Config.BUTTONS_ENABLED = False
+    Config.CUSTOM_BUTTON_TEXT = "View Original"
+    Config.CUSTOM_BUTTON_URL = None
+    Config.BUTTON_TYPE = "custom"
     Config.MESSAGE_FILTERS = {k: True for k in Config.MESSAGE_FILTERS}
-    
-    # Reset button to default
-    Config.CUSTOM_BUTTONS_ENABLED = True
-    Config.CUSTOM_BUTTON_TEXT = "The Skill Wallah"
-    Config.CUSTOM_BUTTON_URL = "https://skillswallah.bio.link/"
     
     if Config.CURRENT_TASK:
         Config.CURRENT_TASK.cancel()
@@ -667,7 +689,7 @@ async def start_batch(client: Client, message: Message):
     Config.START_ID = None
     Config.END_ID = None
     
-    button_status = "✅ Enabled" if Config.CUSTOM_BUTTONS_ENABLED else "❌ Disabled"
+    button_status = "✅ Enabled" if Config.BUTTONS_ENABLED else "❌ Disabled"
     
     await message.reply(
         f"🔹 **Batch Mode Activated**\n"
@@ -802,16 +824,16 @@ async def process_photo_batch(client: Client, message: Message):
             Config.PROCESSING = False
             return
 
-        button_status = "✅ Enabled" if Config.CUSTOM_BUTTONS_ENABLED else "❌ Disabled"
-
+        button_status = "✅ Enabled" if Config.BUTTONS_ENABLED else "❌ Disabled"
+        
         progress_msg = await message.reply(
             f"📸 **Photo Forward Processing Started**\n"
             f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
             f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else message.chat.title}\n"
             f"▫️ Range: {start_id:,}-{end_id:,}\n"
             f"▫️ Total Messages: {total:,}\n"
-            f"▫️ Buttons: {button_status}\n"
-            f"▫️ Filter: Photos only with links in caption\n",
+            f"▫️ Filter: Photos only with links in caption\n"
+            f"▫️ Buttons: {button_status}",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -905,16 +927,16 @@ async def process_batch(client: Client, message: Message):
             Config.PROCESSING = False
             return
 
-        button_status = "✅ Enabled" if Config.CUSTOM_BUTTONS_ENABLED else "❌ Disabled"
-
+        button_status = "✅ Enabled" if Config.BUTTONS_ENABLED else "❌ Disabled"
+        
         progress_msg = await message.reply(
             f"⚡ **Batch Processing Started**\n"
             f"▫️ Source: {Config.SOURCE_CHAT.title}\n"
             f"▫️ Target: {Config.TARGET_CHAT.title if Config.TARGET_CHAT else message.chat.title}\n"
             f"▫️ Range: {start_id:,}-{end_id:,}\n"
             f"▫️ Total: {total:,} messages\n"
-            f"▫️ Buttons: {button_status}\n"
-            f"▫️ Offset: {Config.OFFSET}\n",
+            f"▫️ Offset: {Config.OFFSET}\n"
+            f"▫️ Buttons: {button_status}",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -976,9 +998,8 @@ async def process_batch(client: Client, message: Message):
         Config.CURRENT_TASK = None
 
 if __name__ == "__main__":
-    print("⚡ Ultimate Batch Link Modifier Bot with Inline Buttons Started!")
+    print("⚡ Ultimate Batch Link Modifier Bot Started!")
     print(f"📊 Max Batch Size: {Config.MAX_MESSAGES_PER_BATCH:,} messages")
-    print(f"🔘 Default Button: {Config.CUSTOM_BUTTON_TEXT} -> {Config.CUSTOM_BUTTON_URL}")
     try:
         app.start()
         print("✅ Bot started successfully!")
