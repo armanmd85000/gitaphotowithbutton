@@ -100,8 +100,8 @@ def modify_content(text: str, offset: int) -> str:
     if not text:
         return text
     
-    # Apply word replacements - FIXED: Added x[0] to avoid tuple error
-    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x.lower())):
+    # Apply word replacements
+    for original, replacement in sorted(Config.REPLACEMENTS.items(), key=lambda x: (-len(x[0]), x[0].lower())):
         text = re.sub(rf'\b{re.escape(original)}\b', replacement, text, flags=re.IGNORECASE)
     
     # Modify Telegram links
@@ -165,7 +165,6 @@ async def verify_permissions(client: Client, chat_id: Union[int, str]) -> Tuple[
     except Exception as e:
         return (False, f"Error: {str(e)}")
 
-# FIXED: Completely rewritten process_message function to handle tuple error
 async def process_message(client: Client, source_msg: Message, target_chat_id: int) -> bool:
     for attempt in range(Config.MAX_RETRIES):
         try:
@@ -175,108 +174,34 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
             # Create inline keyboard if enabled
             keyboard = create_inline_keyboard(source_msg)
             
-            # Handle different message types directly - FIXED: No more tuple issues
-            if source_msg.photo and Config.MESSAGE_FILTERS.get('photo', False):
+            media_type = source_msg.media
+            if media_type and Config.MESSAGE_FILTERS.get(media_type.value, False):
                 caption = source_msg.caption or ""
                 modified_caption = modify_content(caption, Config.OFFSET)
-                await client.send_photo(
-                    chat_id=target_chat_id,
-                    photo=source_msg.photo.file_id,
-                    caption=modified_caption,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=keyboard
-                )
-                return True
                 
-            elif source_msg.video and Config.MESSAGE_FILTERS.get('video', False):
-                caption = source_msg.caption or ""
-                modified_caption = modify_content(caption, Config.OFFSET)
-                await client.send_video(
-                    chat_id=target_chat_id,
-                    video=source_msg.video.file_id,
-                    caption=modified_caption,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=keyboard
-                )
-                return True
+                media_mapping = {
+                    MessageMediaType.PHOTO: client.send_photo,
+                    MessageMediaType.VIDEO: client.send_video,
+                    MessageMediaType.DOCUMENT: client.send_document,
+                    MessageMediaType.AUDIO: client.send_audio,
+                    MessageMediaType.ANIMATION: client.send_animation,
+                    MessageMediaType.VOICE: client.send_voice,
+                    MessageMediaType.VIDEO_NOTE: client.send_video_note,
+                    MessageMediaType.STICKER: client.send_sticker
+                }
                 
-            elif source_msg.document and Config.MESSAGE_FILTERS.get('document', False):
-                caption = source_msg.caption or ""
-                modified_caption = modify_content(caption, Config.OFFSET)
-                await client.send_document(
-                    chat_id=target_chat_id,
-                    document=source_msg.document.file_id,
-                    caption=modified_caption,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=keyboard
-                )
-                return True
-                
-            elif source_msg.audio and Config.MESSAGE_FILTERS.get('audio', False):
-                caption = source_msg.caption or ""
-                modified_caption = modify_content(caption, Config.OFFSET)
-                await client.send_audio(
-                    chat_id=target_chat_id,
-                    audio=source_msg.audio.file_id,
-                    caption=modified_caption,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=keyboard
-                )
-                return True
-                
-            elif source_msg.animation and Config.MESSAGE_FILTERS.get('animation', False):
-                caption = source_msg.caption or ""
-                modified_caption = modify_content(caption, Config.OFFSET)
-                await client.send_animation(
-                    chat_id=target_chat_id,
-                    animation=source_msg.animation.file_id,
-                    caption=modified_caption,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=keyboard
-                )
-                return True
-                
-            elif source_msg.voice and Config.MESSAGE_FILTERS.get('voice', False):
-                await client.send_voice(
-                    chat_id=target_chat_id,
-                    voice=source_msg.voice.file_id,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=keyboard
-                )
-                return True
-                
-            elif source_msg.video_note and Config.MESSAGE_FILTERS.get('video_note', False):
-                await client.send_video_note(
-                    chat_id=target_chat_id,
-                    video_note=source_msg.video_note.file_id,
-                    reply_markup=keyboard
-                )
-                return True
-                
-            elif source_msg.sticker and Config.MESSAGE_FILTERS.get('sticker', False):
-                await client.send_sticker(
-                    chat_id=target_chat_id,
-                    sticker=source_msg.sticker.file_id,
-                    reply_markup=keyboard
-                )
-                return True
-                
-            elif source_msg.text and Config.MESSAGE_FILTERS['text']:
-                # Handle text messages
-                final_keyboard = keyboard or source_msg.reply_markup
-                await client.send_message(
-                    chat_id=target_chat_id,
-                    text=modify_content(source_msg.text, Config.OFFSET),
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=final_keyboard
-                )
-                return True
-                
-            elif source_msg.media:
-                # Fallback for other media types using copy_message
-                try:
-                    caption = source_msg.caption or ""
-                    modified_caption = modify_content(caption, Config.OFFSET) if caption else None
+                if media_type in media_mapping:
+                    kwargs = {
+                        'chat_id': target_chat_id,
+                        'caption': modified_caption if media_type != MessageMediaType.STICKER else None,
+                        'parse_mode': ParseMode.MARKDOWN,
+                        'reply_markup': keyboard
+                    }
+                    kwargs[media_type.value] = getattr(source_msg, media_type.value).file_id
+                    
+                    await media_mapping[media_type](**kwargs)
+                    return True
+                else:
                     await client.copy_message(
                         chat_id=target_chat_id,
                         from_chat_id=source_msg.chat.id,
@@ -286,8 +211,23 @@ async def process_message(client: Client, source_msg: Message, target_chat_id: i
                         reply_markup=keyboard
                     )
                     return True
-                except:
-                    return False
+            elif source_msg.text and Config.MESSAGE_FILTERS['text']:
+                # Combine original reply markup with our custom keyboard
+                final_keyboard = keyboard
+                if source_msg.reply_markup and keyboard:
+                    # If both exist, prioritize our custom keyboard
+                    final_keyboard = keyboard
+                elif source_msg.reply_markup and not keyboard:
+                    # Use original if no custom keyboard
+                    final_keyboard = source_msg.reply_markup
+                
+                await client.send_message(
+                    chat_id=target_chat_id,
+                    text=modify_content(source_msg.text, Config.OFFSET),
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=final_keyboard
+                )
+                return True
                 
             return False
             
@@ -431,17 +371,32 @@ async def toggle_button(client: Client, message: Message):
 @app.on_message(filters.command("setbutton"))
 async def set_button(client: Client, message: Message):
     try:
-        parts = message.text.split(None, 2)  # Split into max 3 parts
+        parts = message.text.split(None, 2)
         
         if len(parts) < 3:
+            # Handle the case where they just type /setbutton original
+            if len(parts) == 2 and parts[1].lower() == "original":
+                Config.BUTTON_TYPE = "original_link"
+                Config.CUSTOM_BUTTON_TEXT = "View Original" # Default text
+                
+                # Auto-enable buttons if they were disabled
+                if not Config.BUTTONS_ENABLED:
+                    Config.BUTTONS_ENABLED = True
+                
+                return await message.reply(
+                    f"✅ Button set to use original message links\n"
+                    f"Text: `View Original`\n"
+                    f"ℹ️ Buttons automatically enabled if they were disabled"
+                )
+            
             return await message.reply(
                 "❌ Usage: `/setbutton [text] [url]`\n"
                 "Example: `/setbutton View Original https://example.com`\n\n"
-                "Use `/setbutton [text] original` to use original message links"
+                "Use `/setbutton original` to use original message links"
             )
         
         button_text = parts[1]
-        button_url = parts
+        button_url = parts[2]
         
         if button_url.lower() == "original":
             Config.BUTTON_TYPE = "original_link"
@@ -474,6 +429,7 @@ async def set_button(client: Client, message: Message):
     except Exception as e:
         await message.reply(f"❌ Error setting button: {str(e)}")
 
+# All other existing commands remain the same...
 @app.on_message(filters.command("photoforward"))
 async def start_photo_forward(client: Client, message: Message):
     if Config.PROCESSING:
@@ -548,8 +504,11 @@ async def show_replacements(client: Client, message: Message):
 @app.on_message(filters.command("addreplace"))
 async def add_replacement(client: Client, message: Message):
     try:
-        original = message.command[1]
-        replacement = message.command
+        parts = message.command
+        if len(parts) < 3:
+            return await message.reply("❌ Usage: /addreplace ORIGINAL REPLACEMENT")
+        original = parts[1]
+        replacement = parts[2]
         Config.REPLACEMENTS[original] = replacement
         await message.reply(f"✅ Added replacement: `{original}` → `{replacement}`", parse_mode=ParseMode.MARKDOWN)
     except IndexError:
